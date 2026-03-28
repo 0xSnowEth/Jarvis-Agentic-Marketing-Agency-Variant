@@ -1,0 +1,15 @@
+.env
+venv/
+*.log
+__pycache__/
+.pytest_cache/
+.vscode/
+*.pyc
+.daemon_heartbeat
+assets/
+clients/
+pending_approvals.json
+schedule.json
+reschedule_sessions.json
+whatsapp_audit.log
+*.Zone.Identifier

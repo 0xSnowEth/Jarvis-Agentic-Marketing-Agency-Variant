@@ -1,0 +1,47 @@
+🤖 Starting Caption Agent Tests...
+
+📝 Request:
+Client: client_a
+Topic: A new luxury beachfront villa in Dubai Marina with an infinity pool is available for sale. Schedule a viewing today.
+Platform: instagram
+----------------------------------------
+✅ Agent Output:
+
+{
+    "caption": "يالله! فرصة ما تنعوض لامتلاك فيلا فاخرة على شاطئ دبي مارينا مع مسبح لانهائي يتميز بإطلالة ساحرة. احجزوا مشاهدتكم الحين واستمتعوا بحياة الرفاهية. لا تفوتوا هذه الفرصة! اتصلوا بنا لدعمكم في كل خطوة. \n",
+    "hashtags": ["#عقارات_دبي", "#فلل_فاخرة", "#دبي", "#استثمار_عقاري", "#حياة_الرفاهية"],
+    "seo_keyword_used": "فلل فاخرة",
+    "status": "success"
+}
+============================================================
+
+📝 Request:
+Client: client_b
+Topic: Our new summer iced latte with pistachio is finally here. Perfect for the hot weather.
+Platform: facebook
+----------------------------------------
+✅ Agent Output:
+
+{
+    "caption": "يالله! قهوة مختصة جديدة تنعش يومكم! آيس لاتيه بالفستق وصل، وأحلى من كذا ما في! خوش اختيار لصيف حار، تعالوا جربوه عند ذوق كافيه. ☀️🥤",
+    "hashtags": ["#كافيه_دبي", "#قهوة_مختصة", "#ذوق_كافيه", "#وناسة"],
+    "seo_keyword_used": "كافيه دبي",
+    "status": "success"
+}
+============================================================
+
+📝 Request:
+Client: unknown_client
+Topic: Selling cheap cars
+Platform: instagram
+----------------------------------------
+✅ Agent Output:
+
+{
+    "caption": "حدث خطأ. لم أستطع العثور على ملف تعريف العلامة التجارية للعميل المحدد. يرجى إنشاء ملف تعريف قبل التجربة.",
+    "hashtags": [],
+    "seo_keyword_used": "",
+    "status": "error"
+}
+============================================================
+

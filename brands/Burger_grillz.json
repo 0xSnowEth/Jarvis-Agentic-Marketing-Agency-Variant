@@ -1,0 +1,44 @@
+{
+    "client_name": "Burger_grillz",
+    "business_name": "Burger_grillz",
+    "industry": "general",
+    "brand_voice": {
+        "tone": "energetic, casual, youthful",
+        "style": "conversational",
+        "dialect": "gulf_arabic_khaleeji",
+        "dialect_notes": "Use Gulf Arabic (خليجي)."
+    },
+    "brand_voice_examples": [
+        "الليلة مو لأي برجر.. الليلة حق اللي يعرف يختار الصح من أول قضمة.",
+        "إذا الجوع ضرب بعد الدوام، برجرنا جاهز يرد المزاج ويكمل السهرة.",
+        "سمش حقيقي، صوص يعلق بالمزاج، وطعم يخليك ترجع قبل ما تنسى آخر لقمة.",
+        "مو مجرد وجبة، هذا مزاج ليل الكويت لما يكون الجوع له كلمة.",
+        "إذا تبي برجر يشبعك ويستانس له قلبك، مكانك معروف."
+    ],
+    "services": [
+        "Smash burgers",
+        "24/7"
+    ],
+    "target_audience": "College students, young professionals, and late-night foodies hanging out with friends.",
+    "seo_keywords": [
+        "smash burger kuwait"
+    ],
+    "hashtag_bank": [],
+    "banned_words": [
+        "cheap",
+        "diet",
+        "boring"
+    ],
+    "identity": "Smash Station, a local burger joint specializing in authentic double smash burgers, brisket loaded fries, and crazy milkshakes.",
+    "dos_and_donts": [
+        "Use local Khaleeji slang and talk to customers like a friend.",
+        "Never use words like 'diet', 'healthy', 'light', or 'boring'.",
+        "Frequently mention the signature 'Station Secret Sauce'."
+    ],
+    "caption_defaults": {
+        "min_length": 150,
+        "max_length": 300,
+        "hashtag_count_min": 3,
+        "hashtag_count_max": 5
+    }
+}

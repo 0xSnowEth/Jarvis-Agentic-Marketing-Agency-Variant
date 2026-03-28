@@ -1,0 +1,62 @@
+{
+    "client_name": "Forge House Fitness Kuwait",
+    "business_name": "Forge House Fitness Kuwait",
+    "industry": "fitness_premium_gym_performance_training",
+    "brand_voice": {
+        "tone": "confident, disciplined, premium",
+        "style": "Direct, clean, performance-driven copy. Short strong hooks. No cheesy inspiration.",
+        "dialect": "gulf_arabic_khaleeji",
+        "dialect_notes": "Use words like 'ثقة', 'مثابرة', 'مستوى', 'تغيير' to convey confidence, discipline, and transformation. Avoid childish slang and keep it premium and socially aspirational."
+    },
+    "brand_voice_examples": [
+        "النتائج لا تأتي من المزاج. تأتي من الهيكل، من التكرار، من المعايير.",
+        "تدرّب بنية. بنى جسديًا يتحدث قبل أن تتكلم.",
+        "هنا يصبح التزامك مرئيًا.",
+        "تدريب جدي. بيئة جدية. تغيير جدي.",
+        "إذا كنت تريد الراحة، ابق في المنزل. إذا كنت تريد التقدم، تعال وتدرب."
+    ],
+    "services": [
+        "مembershipات جjim عالية الجودة",
+        "تدريب شخصي",
+        "دروس قوة صغيرة",
+        "توجيه إعادة التركيب الجسمي",
+        "مراجعة مسؤولية التغذية",
+        "باقات التحويل"
+    ],
+    "target_audience": "رجال ونساء في سن 21-38 في الكويت يهتمون بالظهور قويًا، بالشعور حادًا، وعضوية جjim موجهة.",
+    "seo_keywords": [
+        "جيم الكويت",
+        "تدريب شخصي الكويت",
+        "تدريب قوة الكويت",
+        "تحويل الجسم الكويت",
+        "تجديف عالي الجودة الكويت"
+    ],
+    "hashtag_bank": [
+        "#جيم الكويت",
+        "#تدريب شخصي الكويت",
+        "#تدريب قوة الكويت",
+        "#فورچ هاوس",
+        "#تحويل الجسم الكويت"
+    ],
+    "banned_words": [
+        "رخيص",
+        "مثبط",
+        "حل سريع",
+        "ممر",
+        "عجوبة"
+    ],
+    "identity": "فورچ هاوس ليس جjim حيوي رخيص. يبيع الهيكل، الهوية، الأداء، والوجود الجسدي. يجب أن يشعر الأعضاء بأنهم يدخلون نسخة أقوى، أكثر تزامنا من أنفسهم.",
+    "dos_and_donts": [
+        "انتهز صوتًا عالي الجودة، حادًا، موجهًا للاداء.",
+        "انتهز التزامًا، ثقة، ثباتًا، وتحويلًا.",
+        "انتهز هياكل البداية قوية تجعل الجهد يبدو مرغوبًا فيه.",
+        "عد عن الاقتباسات المضحكة. عد عن الهتاف الزائف، اللغز الطفولي، أو اللغة الإنترنتية الطفولية.",
+        "عد عن الكلام مثل جjim رخيص."
+    ],
+    "caption_defaults": {
+        "min_length": 150,
+        "max_length": 300,
+        "hashtag_count_min": 3,
+        "hashtag_count_max": 5
+    }
+}

@@ -1,0 +1,43 @@
+{
+  "client_name": "client_b",
+  "business_name": "ذوق كافيه",
+  "industry": "food_and_beverage",
+  "brand_voice": {
+    "tone": "casual, fun, inviting",
+    "style": "youthful, energetic, mouth-watering descriptions",
+    "dialect": "gulf_arabic_khaleeji",
+    "dialect_notes": "Use Gulf Arabic (خليجي). Keep it light and conversational. Use words like يالله، تعالوا، خوش، وناسة."
+  },
+  "services": [
+    "specialty coffee",
+    "fresh pastries",
+    "catering services",
+    "private event hosting"
+  ],
+  "seo_keywords": [
+    "كافيه دبي",
+    "قهوة مختصة",
+    "حلويات طازجة",
+    "كيترينق",
+    "أفضل كافيه"
+  ],
+  "hashtag_bank": [
+    "#كافيه_دبي",
+    "#قهوة_مختصة",
+    "#حلويات",
+    "#ذوق_كافيه",
+    "#دبي",
+    "#وناسة",
+    "#فطور_دبي"
+  ],
+  "banned_words": [
+    "عادي",
+    "زحمة"
+  ],
+  "caption_defaults": {
+    "min_length": 100,
+    "max_length": 250,
+    "hashtag_count_min": 3,
+    "hashtag_count_max": 5
+  }
+}

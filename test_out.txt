@@ -1,0 +1,37 @@
+
+============================================================
+📊 PIPELINE FINAL REPORT
+============================================================
+Client:       Burger_grillz
+Topic:        test
+SEO Keyword:  برجر
+------------------------------------------------------------
+📋 GENERATED TEXT:
+يالله، ياجماعة شوفوا هالبرجر الساخر من برجر_جرلز! وايد طعم مميز مع فرايز محشية لحم بريسكيت، والميلك شيك جنان! تعالوا عيشوا تجربة الأكل في مطعمنا، أكيد ماراح تندمون! حياكم! #سماش_برجر #برجر #أكل_شوارع #فرايز #ميلك_شيك
+------------------------------------------------------------
+🏷️  LOGGED HASHTAGS (From JSON, not appended):
+#سماش_برجر, #برجر, #أكل_شوارع, #فرايز, #ميلك_شيك
+------------------------------------------------------------
+📈 PUBLISHING RESULTS:
+Facebook:  published (ID: 1339952548335932)
+Instagram: published (ID: 18102825694734350)
+============================================================
+
+
+======================
+2026-03-26 03:11:19,349 - INFO - 🚀 Starting Pipeline for client 'Burger_grillz'...
+2026-03-26 03:11:19,349 - INFO - 📝 Topic: test
+2026-03-26 03:11:19,349 - INFO - 🤖 Handing off to Agent #1 (Caption Generator)...
+2026-03-26 03:11:21,255 - INFO - HTTP Request: POST https://openrouter.ai/api/v1/responses "HTTP/1.1 200 OK"
+2026-03-26 03:11:22,246 - INFO - HTTP Request: POST https://openrouter.ai/api/v1/responses "HTTP/1.1 200 OK"
+2026-03-26 03:11:24,770 - INFO - ✅ Agent #1 successfully generated content.
+2026-03-26 03:11:24,770 - INFO - Caption Length: 216 chars
+2026-03-26 03:11:24,770 - INFO - Hashtags: #سماش_برجر, #برجر, #أكل_شوارع, #فرايز, #ميلك_شيك
+2026-03-26 03:11:24,770 - INFO - 🚀 Handing off to Agent #2 (Meta Publisher)...
+2026-03-26 03:11:24,770 - INFO - Publishing to Facebook Page: 112493307214294 (1 items)
+2026-03-26 03:11:31,744 - INFO - Publishing to Instagram Account: 17841411986638177 (1 items)
+2026-03-26 03:11:39,185 - INFO - Insta Container 18173791723399555 created. Polling readiness...
+2026-03-26 03:11:39,666 - INFO - Polling attempt 1: Status is IN_PROGRESS
+2026-03-26 03:11:43,156 - INFO - Polling attempt 2: Status is FINISHED
+2026-03-26 03:11:43,156 - INFO - Container 18173791723399555 finished. Publishing to feed.
+2026-03-26 03:11:52,349 - WARNING - Failed to flag delivery status: HTTPConnectionPool(host='localhost', port=8000): Read timed out. (read timeout=5)

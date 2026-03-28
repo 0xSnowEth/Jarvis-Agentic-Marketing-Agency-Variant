@@ -1,0 +1,10 @@
+anyio==4.12.1
+fastapi==0.135.2
+openai==2.29.0
+openai-agents==0.12.5
+pypdf==6.9.2
+python-docx==1.2.0
+python-dotenv==1.2.2
+python-multipart==0.0.22
+requests==2.32.5
+uvicorn==0.42.0

@@ -1,0 +1,63 @@
+{
+    "client_name": "Iron District gym",
+    "business_name": "Iron District Gym",
+    "industry": "fitness_premium_gym_performance_training",
+    "brand_voice": {
+        "tone": "confident, disciplined, premium",
+        "style": "Direct, clean, performance-driven copy. Short strong hooks. No cheesy inspiration.",
+        "dialect": "gulf_arabic_khaleeji",
+        "dialect_notes": "Use premium, masculine/feminine balanced, and socially aspirational vocabulary. Avoid childish slang."
+    },
+    "brand_voice_examples": [
+        "النتائج لا تأتي من المزاج. تأتي من الهيكل، التكرار، والمقاييس.",
+        "تدرّب بنية. ابني جسدا يتحدث قبل أن تتكلم.",
+        "هنا يصبح التزامك مرئيا.",
+        "تدرّب جاد. بيئة جادة. تغيير جاد.",
+        "إذا كنت تريد الراحة، ابق في المنزل. إذا كنت تريد التقدم، تعال لتدرّب."
+    ],
+    "services": [
+        "Premium gym memberships",
+        "Personal training",
+        "Small-group strength classes",
+        "Body recomposition coaching",
+        "Nutrition accountability check-ins",
+        "Transformation packages"
+    ],
+    "target_audience": "Men and women ages 21-38 in Kuwait who care about looking strong, feeling sharp, and joining a disciplined gym community. They are office professionals, young entrepreneurs, university graduates, and image-conscious adults who want visible results.",
+    "seo_keywords": [
+        "جيم الكويت",
+        "تدرّب شخصي الكويت",
+        "تدرّب قوة الكويت",
+        "تحويل الجسم الكويت",
+        "تجربة فنية عالية الكويت"
+    ],
+    "hashtag_bank": [
+        "#جيم الكويت",
+        "#تدرّب شخصي الكويت",
+        "#تدرّب قوة الكويت",
+        "#تحويل الجسم الكويت",
+        "#IronDistrict"
+    ],
+    "banned_words": [
+        "رخيص",
+        "متباطئ",
+        "حل سريع",
+        "مختصر",
+        "عجوبة"
+    ],
+    "identity": "Iron District Gym is not a cheap neighborhood gym. It sells structure, identity, performance, and physical presence. Members should feel that joining Iron District means entering a stronger, more disciplined version of themselves.",
+    "dos_and_donts": [
+        "أبقي على صوتك فخما، حادا، وفنيا.",
+        "أشيد بالتزام، الاستمرارية، الثقة، والتحول.",
+        "استخدم مقتطفات قوية تثير الرغبة في الجهد.",
+        "عد عن الاقتباسات المضحكة.",
+        "عد عن الهتاف الزائف، اللهجة السخيفة، أو لغة الإنترنت الطفولية.",
+        "عد عن الكلام مثل جيم رخيص."
+    ],
+    "caption_defaults": {
+        "min_length": 150,
+        "max_length": 300,
+        "hashtag_count_min": 3,
+        "hashtag_count_max": 5
+    }
+}

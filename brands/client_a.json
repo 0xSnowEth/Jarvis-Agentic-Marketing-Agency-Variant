@@ -1,0 +1,44 @@
+{
+  "client_name": "client_a",
+  "business_name": "الرؤية العقارية",
+  "industry": "real_estate",
+  "brand_voice": {
+    "tone": "professional yet warm",
+    "style": "confident, aspirational, trustworthy",
+    "dialect": "gulf_arabic_khaleeji",
+    "dialect_notes": "Use Gulf Arabic (خليجي). Avoid Egyptian or Levantine expressions. Use common Khaleeji words like يالله، حياكم، الحين، وايد، خوش."
+  },
+  "services": [
+    "luxury villa sales",
+    "apartment rentals",
+    "property management",
+    "real estate investment consulting"
+  ],
+  "seo_keywords": [
+    "عقارات دبي",
+    "فلل فاخرة",
+    "شقق للإيجار",
+    "استثمار عقاري",
+    "عقارات الإمارات"
+  ],
+  "hashtag_bank": [
+    "#عقارات_دبي",
+    "#فلل_فاخرة",
+    "#الإمارات",
+    "#استثمار_عقاري",
+    "#دبي",
+    "#عقارات",
+    "#حياة_الرفاهية"
+  ],
+  "banned_words": [
+    "رخيص",
+    "مجاني",
+    "خسارة"
+  ],
+  "caption_defaults": {
+    "min_length": 150,
+    "max_length": 300,
+    "hashtag_count_min": 3,
+    "hashtag_count_max": 5
+  }
+}

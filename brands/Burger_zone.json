@@ -1,0 +1,29 @@
+{
+    "client_name": "Burger_zone",
+    "business_name": "Burger_zone",
+    "industry": "general",
+    "brand_voice": {
+        "tone": "energetic, casual, youthful",
+        "style": "conversational",
+        "dialect": "gulf_arabic_khaleeji",
+        "dialect_notes": "Use Khaleeji Gulf Arabic vocabulary."
+    },
+    "brand_voice_examples": [],
+    "services": [],
+    "target_audience": "College students, young professionals, and late-night foodies hanging out with friends.",
+    "seo_keywords": [],
+    "hashtag_bank": [],
+    "banned_words": [],
+    "identity": "Smash Station, a local burger joint specializing in authentic double smash burgers, brisket loaded fries, and crazy milkshakes.",
+    "dos_and_donts": [
+        "Use local Khaleeji slang and talk to customers like a friend.",
+        "Never use words like 'diet', 'healthy', 'light', or 'boring'.",
+        "Frequently mention the signature 'Station Secret Sauce'."
+    ],
+    "caption_defaults": {
+        "min_length": 150,
+        "max_length": 300,
+        "hashtag_count_min": 3,
+        "hashtag_count_max": 5
+    }
+}
