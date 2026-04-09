@@ -1,76 +1,103 @@
-# Caption Generation Agent — Spec
+# Caption Agent Spec
 
-## 1. Goal
+This file documents the current caption agent and the next required extension.
 
-Generate Gulf Arabic (خليجي), SEO-friendly social media captions in a client's brand voice for Facebook and Instagram.
+## Current Goal
 
-This is agent #1 of a larger system. It does NOT schedule posts, manage WhatsApp, or run ads. Only caption generation.
+Generate brand-aware social captions for saved client drafts and content topics.
 
-## 2. Tools
+Today the agent is strongest when the target output is Arabic. It uses:
+- client brand profile
+- services
+- target audience
+- SEO keywords
+- hashtag bank
+- brand voice examples
 
-**Tool 1: `load_brand_profile`**
-- Reads a client's brand voice JSON file from `brands/{client_name}.json`
-- Returns: tone, dialect, banned words, SEO keywords, hashtag bank, services offered
-- Read-only
+## Current Inputs
 
-**Tool 2: `generate_caption`**
-- Takes the brand profile + a content topic + target platform (instagram/facebook)
-- Uses the LLM to produce the caption
-- Returns: Arabic caption (150–300 chars), 3–5 Arabic hashtags, embedded SEO keyword
-- The LLM IS the tool here — no external caption API
+- `client_id`
+- draft/topic context
+- media type
+- stored brand profile
 
-That's it. 2 tools.
+## Current Outputs
 
-## 3. Starting Information (required per run)
+- caption text
+- hashtags
+- structured payload used by the dashboard / pipeline
 
-| Input | Example | Required? |
-|---|---|---|
-| Client name | `"client_a"` | Yes — maps to brand profile JSON |
-| Content topic | `"summer real estate deals in Dubai"` | Yes |
-| Platform | `"instagram"` or `"facebook"` | Yes — affects caption length/style |
-| Image/video description | `"luxury villa pool shot"` | Optional — helps caption relevance |
+## Current Reality
 
-If client name doesn't match any brand profile file → agent halts, logs error. No guessing.
+The current implementation is Arabic-first.
 
-## 4. What Success Looks Like
+That was correct for the earliest customer brief, but it is now a limitation because the system needs to support:
+- English-language clients
+- Arabic-language clients
+- English briefs that still require Arabic captions
 
-A successful run produces:
+## Required Upgrade
 
-- Caption in **Gulf Arabic** (not MSA, not Egyptian)
-- **150–300 characters** (adjustable per client later)
-- **3–5 Arabic hashtags** relevant to the topic and industry
-- At least **1 SEO keyword** from the brand profile embedded naturally in the caption
-- Tone matches the brand voice profile (formal, casual, warm — whatever the profile says)
-- Output is **structured** (JSON with `caption`, `hashtags`, `seo_keyword_used` fields) — not just raw text
+The next version of the caption agent must support separated language concerns:
 
-## 5. What Failure Looks Like
+### 1. Brief language
+What language the agency used when writing the intake / client brief.
 
-| Failure | What Happens | Agent Response |
-|---|---|---|
-| Brand profile JSON not found | `brands/client_x.json` doesn't exist | Halt. Return error: "No brand profile for client_x. Create one before running." |
-| LLM returns English or MSA instead of Khaleeji | Model ignores dialect instruction | Retry once with stronger dialect prompt. If still wrong, flag for human review. |
-| Caption exceeds 300 chars | LLM over-generates | Truncate at nearest sentence boundary. Log a warning. |
-| LLM returns empty or garbage | API error or model failure | Return structured error with the raw response saved for debugging. |
-| Missing required input | No topic or no platform provided | Halt immediately. Don't guess the topic. |
+### 2. Brand primary language
+What language the client primarily communicates in.
 
-## 6. When to Ask a Human
+### 3. Caption output language
+What language Jarvis should generate for publishing.
 
-- Brand profile is missing → **hard stop**, don't invent a brand voice
-- Caption is about a sensitive topic (politics, religion, competitors) → **hold for review**
-- LLM fails dialect check twice → **send draft to human for manual edit**
-- Any content that could damage the client's brand reputation → **never auto-publish** (this agent doesn't publish anyway, but the rule carries forward)
+These are not always the same.
 
-## 7. What We're Using (for now)
+Example:
+- brief language: English
+- brand primary language: Arabic
+- caption output language: Arabic
 
-- **LLM**: `gpt-4o-mini` via OpenRouter (free tier for development)
-- **SDK**: OpenAI Agents SDK (`from agents import Agent, Runner, function_tool`)
-- **Brand storage**: JSON files in `brands/` directory
-- **Production upgrade path**: swap model to GPT-5 / Claude Opus, swap JSON to PostgreSQL
+## Proposed Minimal Data Shape
 
-## 8. Out of Scope (for this agent)
+Add a language profile to the stored client profile:
 
-- ❌ Posting to Meta (that's agent #2)
-- ❌ Scheduling (that's the scheduler layer)
-- ❌ WhatsApp follow-ups (that's agent #3)
-- ❌ Ad targeting (future feature)
-- ❌ Owner briefings via WhatsApp (system-level feature, not this agent's job)
+```json
+{
+  "language_profile": {
+    "brief_language": "english",
+    "primary_language": "arabic",
+    "caption_output_language": "arabic",
+    "arabic_mode": "gulf"
+  }
+}
+```
+
+## Required Behavior
+
+### Arabic output
+- natural Gulf Arabic when configured
+- not robotic MSA unless explicitly requested
+
+### English output
+- clean premium agency English
+- not literal Arabic-to-English translation
+
+### Bilingual output
+- optional mode for mixed campaigns
+- must be explicit, not accidental
+
+## Required UI Support
+
+The dashboard should expose:
+- primary language
+- caption output language
+- optional per-draft override
+
+## What Not To Do
+
+- do not guess Arabic output just because the system was originally Arabic-first
+- do not assume the brief language is the publish language
+- do not hide the chosen output language from the operator
+
+## Current Priority
+
+This bilingual extension is one of the highest-value remaining product upgrades before broader demos and deployment.

@@ -3,6 +3,8 @@ import json
 from dotenv import load_dotenv
 
 load_dotenv()
+WHATSAPP_MODEL = os.getenv("WHATSAPP_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
+TRIAGE_MODEL = os.getenv("TRIAGE_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
 from agents import Agent, Runner, function_tool, set_default_openai_client, set_tracing_disabled
 from openai import AsyncOpenAI
 
@@ -21,21 +23,21 @@ def load_brand_profile(client_name: str) -> str:
     Loads the client's CRM profile containing their voice, rules, and services.
     ALWAYS call this before generating a response to ensure tone matching.
     """
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(base_dir, "brands", f"{client_name}.json")
-    
-    if not os.path.exists(file_path):
-        return json.dumps({"status": "error", "message": f"Profile for {client_name} not found."})
-        
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        from client_store import get_client_store
+        store = get_client_store()
+        data = store.get_brand_profile(client_name)
+        if not data:
+            return json.dumps({"status": "error", "message": f"Profile for {client_name} not found."})
         data["status"] = "success"
         return json.dumps(data, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"status": "error", "message": f"Failed to load profile: {str(e)}"})
 
 
 whatsapp_agent = Agent(
     name="Account Manager",
-    model="openai/gpt-4o-mini",
+    model=WHATSAPP_MODEL,
     instructions="""You are a highly professional, extremely friendly Account Manager for an Arab-market social media agency.
     
 Your mandate is to reply to incoming WhatsApp messages from clients.
@@ -79,7 +81,7 @@ def run_whatsapp_agent(client_name: str, message_text: str) -> str:
 # =========================================================
 triage_agent = Agent(
     name="Escalation Router",
-    model="openai/gpt-4o-mini",
+    model=TRIAGE_MODEL,
     instructions="""You are a strict security firewall for an Arab-market social media agency.
 Your ONLY job is to read an incoming client text message and decide if it urgently needs human intervention.
 
@@ -100,5 +102,5 @@ def run_triage_agent(message_text: str) -> str:
         result = Runner.run_sync(triage_agent, f"Message to evaluate: '{message_text}'")
         return result.final_output.strip().upper()
     except Exception as e:
-        # Failsafe: If the Triage AI crashes, assume SAFE so the main agent can still attempt to help
-        return "SAFE"
+        # Failsafe: If the Triage AI crashes, assume ESCALATE so a human reviews it (fail-safe)
+        return "ESCALATE"

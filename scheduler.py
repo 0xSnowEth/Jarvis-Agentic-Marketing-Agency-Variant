@@ -1,24 +1,28 @@
 import os
 import sys
 import time
+import signal
 import logging
 import argparse
 import subprocess
 import schedule
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
-from schedule_store import is_schedulable_job, load_schedule, schedule_signature
+from client_store import get_data_backend_name
+from schedule_store import is_schedulable_job, load_schedule, mark_job_failed, schedule_signature
 from schedule_utils import parse_iso_date
 
-# Configure logging specifically for the daemon layer
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("scheduler_daemon.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
+# Configure logging with rotation for the daemon layer
+_log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_file_handler = RotatingFileHandler(
+    "scheduler_daemon.log", maxBytes=5 * 1024 * 1024, backupCount=3
 )
+_file_handler.setFormatter(_log_formatter)
+_stream_handler = logging.StreamHandler(sys.stdout)
+_stream_handler.setFormatter(_log_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler])
 logger = logging.getLogger("SchedulerDaemon")
 
 
@@ -45,7 +49,8 @@ def run_pipeline(client: str, topic: str, images: list = None, videos: list = No
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True
+            text=True,
+            timeout=300,
         )
 
         if result.returncode == 0:
@@ -55,9 +60,28 @@ def run_pipeline(client: str, topic: str, images: list = None, videos: list = No
             logger.error(f"? [FAILURE] Pipeline crashed for '{client}' (Exit Code {result.returncode}).")
             logger.error(f"Pipeline StdErr: {result.stderr}")
             logger.error(f"Pipeline StdOut: {result.stdout}")
+            if job_id:
+                failure_reason = (result.stderr or result.stdout or "Pipeline execution failed.").strip()
+                try:
+                    mark_job_failed(job_id, reason=failure_reason[:500])
+                    logger.info(f"Marked job '{job_id}' as failed after pipeline error.")
+                except Exception as store_exc:
+                    logger.warning(f"Failed to mark job '{job_id}' as failed: {store_exc}")
 
+    except subprocess.TimeoutExpired:
+        logger.error(f"⏰ [TIMEOUT] Pipeline timed out after 300s for '{client}'. Marking job as failed.")
+        if job_id:
+            try:
+                mark_job_failed(job_id, reason="Pipeline execution timed out after 300 seconds.")
+            except Exception as store_exc:
+                logger.warning(f"Failed to mark job '{job_id}' as failed after timeout: {store_exc}")
     except Exception as e:
-        logger.error(f"? [FATAL] Failed to spawn subprocess for '{client}': {str(e)}")
+        logger.error(f"💥 [FATAL] Failed to spawn subprocess for '{client}': {str(e)}")
+        if job_id:
+            try:
+                mark_job_failed(job_id, reason=str(e)[:500])
+            except Exception as store_exc:
+                logger.warning(f"Failed to mark job '{job_id}' as failed after fatal scheduler error: {store_exc}")
 
 
 def run_date_bound_pipeline(client: str, topic: str, scheduled_date: str, images: list = None, videos: list = None, job_id: str | None = None, draft_name: str | None = None):
@@ -168,6 +192,19 @@ def build_schedule(jobs: list):
                 logger.warning(f"Unrecognized day '{day}' for client '{client}'. Skipping this day rule.")
 
 
+def schedule_state_signature(jobs: list[dict]) -> tuple:
+    normalized = []
+    for job in jobs:
+        normalized.append(
+            (
+                str(job.get("job_id") or "").strip(),
+                str(job.get("status") or "").strip(),
+                schedule_signature(job),
+            )
+        )
+    return tuple(sorted(normalized))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agent Scheduler Daemon")
     parser.add_argument("--dry-run", action="store_true", help="Load and print the schedule to verify, then exit immediately without starting the daemon.")
@@ -201,17 +238,39 @@ def main():
 
     config_path = "schedule.json"
     last_mod_time = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
+    backend_mode = get_data_backend_name()
+    last_schedule_signature = schedule_state_signature(jobs)
+
+    _shutdown_requested = False
+
+    def _handle_sigterm(signum, frame):
+        nonlocal _shutdown_requested
+        logger.info("Received SIGTERM. Completing current cycle and shutting down gracefully...")
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     try:
-        while True:
-            current_mod_time = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
-            if current_mod_time > last_mod_time:
-                logger.info("schedule.json modified on disk! Hot-reloading triggers...")
-                schedule.clear()
-                new_jobs = load_schedule_config(config_path)
-                build_schedule(new_jobs)
-                last_mod_time = current_mod_time
-                logger.info(f"Hot-reload complete. Now tracking {len(schedule.get_jobs())} triggers.")
+        while not _shutdown_requested:
+            if backend_mode == "json":
+                current_mod_time = os.path.getmtime(config_path) if os.path.exists(config_path) else 0
+                if current_mod_time > last_mod_time:
+                    logger.info("schedule.json modified on disk! Hot-reloading triggers...")
+                    schedule.clear()
+                    new_jobs = load_schedule_config(config_path)
+                    build_schedule(new_jobs)
+                    last_mod_time = current_mod_time
+                    last_schedule_signature = schedule_state_signature(new_jobs)
+                    logger.info(f"Hot-reload complete. Now tracking {len(schedule.get_jobs())} triggers.")
+            else:
+                fresh_jobs = load_schedule_config(config_path)
+                fresh_signature = schedule_state_signature(fresh_jobs)
+                if fresh_signature != last_schedule_signature:
+                    logger.info("Schedule store changed in the database. Hot-reloading triggers...")
+                    schedule.clear()
+                    build_schedule(fresh_jobs)
+                    last_schedule_signature = fresh_signature
+                    logger.info(f"Hot-reload complete. Now tracking {len(schedule.get_jobs())} triggers.")
 
             with open(".daemon_heartbeat", "w", encoding="utf-8") as f:
                 f.write(str(time.time()))
@@ -220,6 +279,8 @@ def main():
             time.sleep(10)
     except KeyboardInterrupt:
         logger.info("Scheduler Daemon manually stopped via Keyboard Interrupt.")
+
+    logger.info("Scheduler Daemon shut down cleanly.")
 
 
 if __name__ == "__main__":

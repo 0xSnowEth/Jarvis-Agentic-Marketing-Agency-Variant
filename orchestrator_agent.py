@@ -3,16 +3,22 @@ import json
 import logging
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from agent import Agent
+from asset_store import list_client_assets
+from client_store import get_client_store
 from schedule_store import add_scheduled_job, load_schedule
+from approval_store import save_pending_approval
+from draft_store import get_draft_media_paths, list_client_drafts, resolve_draft_payload
 from schedule_utils import (
     format_schedule_label,
     normalize_schedule_request,
+    normalize_prompt_date_typos,
     past_time_error_message,
+    parse_time_string,
+    resolve_date_phrase,
     schedule_request_is_in_past,
 )
-from queue_store import get_bundle_media_paths, load_queue_data
 
 logger = logging.getLogger("Orchestrator")
 
@@ -20,6 +26,10 @@ logger = logging.getLogger("Orchestrator")
 SCHEDULE_WORDS = (
     "schedule",
     "today",
+    "tonight",
+    "this evening",
+    "this afternoon",
+    "this morning",
     "tomorrow",
     "next ",
     "this ",
@@ -32,15 +42,514 @@ SCHEDULE_WORDS = (
     " sunday",
     "/",
 )
-IMMEDIATE_WORDS = ("post now", "right now", "immediately", "asap", "instantly")
+IMMEDIATE_WORDS = ("post now", "post this now", "right now", "immediately", "asap", "instantly", "now")
 TIME_WINDOW_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(am|pm)\b", re.IGNORECASE)
+SMART_DRAFT_REF_RE = re.compile(
+    r'@\[(?P<client>[^\]]+)\]\s+draft_id:"(?P<draft_id>[^"]+)"(?:\s+draft:"(?P<draft>[^"]+)")?',
+    re.IGNORECASE,
+)
+VISIBLE_SMART_DRAFT_RE = re.compile(
+    r'@\[(?P<client>[^\]]+)\]\s+draft\s+[·Â·]\s+(?P<draft>.+?)(?=(?:\s+(?:please|post|publish|schedule|delete|move|refine|approve|for|now|today|tomorrow|next)\b)|$)',
+    re.IGNORECASE,
+)
 
+
+
+
+ROBUST_CLIENT_MENTION_RE = re.compile(r'@\[(?P<client>[^\]]+)\]', re.IGNORECASE)
+RAW_CLIENT_MENTION_RE = re.compile(r'(?<!\[)@(?P<client>[A-Za-z0-9_-]+)', re.IGNORECASE)
+ROBUST_DRAFT_MARKER_RE = re.compile(r'\bdraft\b\s*(?:[·•:\-\u2013\u2014]|Â·|Ã‚Â·)\s*', re.IGNORECASE)
+BATCH_POST_WORDS = ("post", "publish", "launch", "release")
+CLAUSE_SPLIT_RE = re.compile(r"(?:,\s*|\band also\b|\band then\b|;\s*|\n+)", re.IGNORECASE)
+DATE_TOKEN_RE = re.compile(
+    r"\b(today|tonight|this evening|this afternoon|this morning|tomorrow|(this|next)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:date\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?|"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december|"
+    r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\s+\d{1,2}(?:st|nd|rd|th)?(?:\s+\d{4})?|"
+    r"\d{1,2}/\d{1,2}(?:/\d{2,4})?|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    re.IGNORECASE,
+)
+ACTION_PREVIEW_WORDS = ("preview", "check", "validate", "review", "plan", "ready")
+
+
+def _clean_draft_reference_text(value: str) -> str:
+    text = str(value or "")
+    for token in ("Ã‚Â·", "Â·", "\u00b7", "\u2022", "\u2013", "\u2014"):
+        text = text.replace(token, " ")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalize_draft_match_text(value: str) -> str:
+    cleaned = _clean_draft_reference_text(value).lower()
+    cleaned = re.sub(r"[\"'`]+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip(" ,.;:!?-")
+
+
+def _normalize_client_match_text(value: str) -> str:
+    cleaned = str(value or "").strip().lower()
+    cleaned = re.sub(r"[_\-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _candidate_matches_draft_name(candidate: str, draft_name: str) -> bool:
+    normalized_candidate = _normalize_draft_match_text(candidate)
+    normalized_draft = _normalize_draft_match_text(draft_name)
+    if not normalized_candidate or not normalized_draft:
+        return False
+    if normalized_candidate == normalized_draft:
+        return True
+    if not normalized_candidate.startswith(normalized_draft):
+        return False
+    remainder = normalized_candidate[len(normalized_draft):].strip(" ,.;:!?-")
+    if not remainder:
+        return True
+    return remainder.startswith(
+        (
+            "and post",
+            "and publish",
+            "and schedule",
+            "and send",
+            "post",
+            "publish",
+            "schedule",
+            "send",
+            "now",
+            "tonight",
+            "for approval",
+            "today",
+            "tomorrow",
+            "this evening",
+            "this afternoon",
+            "this morning",
+            "by ",
+            "next ",
+            "at ",
+            "on ",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+            "sunday",
+        )
+    )
+
+
+def _lookup_client_draft_refs(client_id: str) -> list[dict]:
+    bundles = list_client_drafts(client_id).get("bundles", {})
+    refs = []
+    if not isinstance(bundles, dict):
+        return refs
+    for draft_name, payload in bundles.items():
+        name = str(draft_name or "").strip()
+        if not name:
+            continue
+        refs.append(
+            {
+                "client_id": client_id,
+                "draft_name": name,
+                "draft_id": str((payload or {}).get("draft_id") or "").strip(),
+            }
+        )
+    refs.sort(key=lambda item: len(item["draft_name"]), reverse=True)
+    return refs
+
+
+def _resolve_visible_draft_reference(client_id: str, candidate: str, provided_refs: list[dict]) -> dict | None:
+    for ref in provided_refs:
+        draft_name = str(ref.get("draft_name") or "").strip()
+        if _candidate_matches_draft_name(candidate, draft_name):
+            return {
+                "client_id": client_id,
+                "draft_name": draft_name,
+                "draft_id": str(ref.get("draft_id") or "").strip(),
+            }
+
+    for ref in _lookup_client_draft_refs(client_id):
+        draft_name = str(ref.get("draft_name") or "").strip()
+        if _candidate_matches_draft_name(candidate, draft_name):
+            return ref
+    return None
+
+
+def _default_single_draft_reference(client_id: str, provided_refs: list[dict]) -> dict | None:
+    candidates = [ref for ref in provided_refs if str(ref.get("draft_name") or "").strip()]
+    if not candidates:
+        candidates = _lookup_client_draft_refs(client_id)
+    if len(candidates) != 1:
+        return None
+    chosen = candidates[0]
+    return {
+        "client_id": client_id,
+        "draft_name": str(chosen.get("draft_name") or "").strip(),
+        "draft_id": str(chosen.get("draft_id") or "").strip(),
+    }
+
+
+def collect_explicit_draft_targets(prompt: str, provided_refs: list[dict] | None = None) -> list[dict]:
+    raw = str(prompt or "")
+    if not raw:
+        return []
+
+    provided_refs = [ref for ref in (provided_refs or []) if isinstance(ref, dict)]
+    provided_by_client: dict[str, list[dict]] = {}
+    for ref in provided_refs:
+        client_id = resolve_client_id(str(ref.get("client_id") or "").strip())
+        if not client_id:
+            continue
+        prepared = {
+            "client_id": client_id,
+            "draft_name": str(ref.get("draft_name") or "").strip(),
+            "draft_id": str(ref.get("draft_id") or "").strip(),
+        }
+        provided_by_client.setdefault(client_id, []).append(prepared)
+
+    targets: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for match in SMART_DRAFT_REF_RE.finditer(raw):
+        client_id = resolve_client_id(str(match.group("client") or "").strip())
+        draft_name = str(match.group("draft") or "").strip()
+        draft_id = str(match.group("draft_id") or "").strip()
+        if not client_id or not draft_name:
+            continue
+        key = (client_id.lower(), (draft_id or draft_name).lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append({"client_id": client_id, "draft_name": draft_name, "draft_id": draft_id})
+
+    mentions = list(ROBUST_CLIENT_MENTION_RE.finditer(raw))
+    for index, match in enumerate(mentions):
+        client_id = resolve_client_id(str(match.group("client") or "").strip())
+        if not client_id:
+            continue
+        segment_end = mentions[index + 1].start() if index + 1 < len(mentions) else len(raw)
+        segment = raw[match.end():segment_end]
+        marker = ROBUST_DRAFT_MARKER_RE.search(segment)
+        candidate = segment[marker.end():].strip() if marker else ""
+        resolved = None
+        if candidate:
+            resolved = _resolve_visible_draft_reference(client_id, candidate, provided_by_client.get(client_id, []))
+        if not resolved:
+            resolved = _default_single_draft_reference(client_id, provided_by_client.get(client_id, []))
+        if not resolved:
+            continue
+        key = (client_id.lower(), (resolved.get("draft_id") or resolved.get("draft_name") or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(resolved)
+
+    raw_mentions = list(RAW_CLIENT_MENTION_RE.finditer(raw))
+    for index, match in enumerate(raw_mentions):
+        client_id = resolve_client_id(str(match.group("client") or "").strip())
+        if not client_id:
+            continue
+        segment_end = raw_mentions[index + 1].start() if index + 1 < len(raw_mentions) else len(raw)
+        segment = raw[match.end():segment_end]
+        raw_candidate_match = re.search(
+            r'^\s*\.\s*(?:draft\b\s*(?:[Â·â€¢:\-\u2013\u2014]|Ã‚Â·|Ãƒâ€šÃ‚Â·)?\s*)?(?P<draft>.+)$',
+            segment,
+            re.IGNORECASE,
+        )
+        candidate = str(raw_candidate_match.group("draft") or "").strip() if raw_candidate_match else ""
+        resolved = None
+        if candidate:
+            resolved = _resolve_visible_draft_reference(client_id, candidate, provided_by_client.get(client_id, []))
+        if not resolved:
+            resolved = _default_single_draft_reference(client_id, provided_by_client.get(client_id, []))
+        if not resolved:
+            continue
+        key = (client_id.lower(), (resolved.get("draft_id") or resolved.get("draft_name") or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(resolved)
+
+    return targets
+
+
+def _normalize_clause_text(raw_clause: str) -> str:
+    text = normalize_prompt_date_typos(raw_clause)
+    text = re.sub(r"\s+", " ", text).strip(" ,;\n\t")
+    text = re.sub(r"^(?:and\s+(?:also\s+|then\s+)?)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdate\s+(\d{1,2})(st|nd|rd|th)\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bat\s+exactly\b", "at", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def _split_release_clauses(prompt: str) -> list[str]:
+    raw = str(prompt or "").strip()
+    if not raw:
+        return []
+    parts = [segment.strip() for segment in CLAUSE_SPLIT_RE.split(raw) if str(segment or "").strip()]
+    merged: list[str] = []
+    for part in parts:
+        if merged and not re.search(r'@\[[^\]]+\]|@\w+', part):
+            merged[-1] = f"{merged[-1]} {part}".strip()
+            continue
+        merged.append(part)
+    return merged
+
+
+def _format_clause_time(text: str) -> str | None:
+    match = TIME_WINDOW_RE.search(str(text or ""))
+    if not match:
+        return None
+    hour = match.group(0)
+    try:
+        parsed = parse_time_string(hour)
+    except Exception:
+        return None
+    return datetime.combine(datetime.now().date(), parsed).strftime("%I:%M %p")
+
+
+def _resolve_loose_weekday(token: str) -> str | None:
+    lowered = str(token or "").strip().lower()
+    weekdays = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    if lowered not in weekdays:
+        return None
+    today = datetime.now().date()
+    target = weekdays.index(lowered)
+    delta = (target - today.weekday()) % 7
+    resolved = today + timedelta(days=delta)
+    return resolved.isoformat()
+
+
+def _extract_clause_schedule(raw_clause: str) -> tuple[dict | None, str | None]:
+    clause = _normalize_clause_text(raw_clause)
+    lower = clause.lower()
+    has_schedule_language = bool(
+        TIME_WINDOW_RE.search(lower)
+        or DATE_TOKEN_RE.search(lower)
+        or any(token in lower for token in SCHEDULE_WORDS)
+    )
+    if not has_schedule_language:
+        return None, None
+
+    formatted_time = _format_clause_time(clause)
+    date_value = None
+    date_match = DATE_TOKEN_RE.search(clause)
+    if date_match:
+        token = str(date_match.group(0) or "").strip()
+        resolved = resolve_date_phrase(token)
+        if not resolved and token.lower() in {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}:
+            loose = _resolve_loose_weekday(token)
+            date_value = loose
+        elif resolved:
+            date_value = resolved.isoformat()
+
+    if formatted_time and date_value:
+        return {"scheduled_date": date_value, "time": formatted_time}, None
+
+    if "schedule" in lower or has_schedule_language:
+        if not date_value and not formatted_time:
+            return None, f"Jarvis needs an exact release date and time for this clause: {clause}"
+        if not date_value:
+            return None, f"Jarvis needs a release date for this clause: {clause}"
+        if not formatted_time:
+            return None, f"Jarvis needs an exact release time for this clause: {clause}"
+
+    return None, None
+
+
+def _resolve_clause_action(raw_clause: str, schedule_payload: dict | None) -> tuple[str | None, str | None]:
+    clause = _normalize_clause_text(raw_clause)
+    lower = clause.lower()
+    immediate = contains_immediate_intent(lower)
+    publish_language = any(keyword in lower for keyword in BATCH_POST_WORDS)
+    schedule_language = "schedule" in lower or bool(schedule_payload)
+
+    if immediate and not schedule_payload:
+        return "post_now", None
+    if schedule_payload:
+        return "schedule", None
+    if schedule_language:
+        return None, f"Jarvis needs both a date and time before it can schedule this clause: {clause}"
+    if publish_language:
+        return None, f"Jarvis needs either 'now' or an exact release window for this clause: {clause}"
+    if any(keyword in lower for keyword in ACTION_PREVIEW_WORDS):
+        return None, f"Preview-only clause detected without an executable release action: {clause}"
+    return None, f"Jarvis could not infer whether this clause should post now or schedule later: {clause}"
+
+
+def parse_multi_clause_release_request(prompt: str, draft_refs: list[dict] | None = None) -> dict | None:
+    raw_prompt = str(prompt or "").strip()
+    if not raw_prompt:
+        return None
+
+    clauses = _split_release_clauses(raw_prompt)
+    if not clauses:
+        return None
+
+    tasks: list[dict] = []
+    warnings: list[str] = []
+
+    for clause in clauses:
+        normalized_clause = _normalize_clause_text(clause)
+        if not normalized_clause:
+            continue
+        if not re.search(r'@\[[^\]]+\]|@\w+', normalized_clause):
+            continue
+
+        explicit_refs = collect_explicit_draft_targets(normalized_clause, draft_refs)
+        if len(explicit_refs) != 1:
+            warning = (
+                f"Jarvis could not isolate one draft in this clause: {normalized_clause}"
+                if not explicit_refs
+                else f"Jarvis found multiple draft targets in one clause and needs them separated: {normalized_clause}"
+            )
+            warnings.append(warning)
+            tasks.append(
+                {
+                    "client_id": "",
+                    "client_label": "",
+                    "draft_id": "",
+                    "draft_label": "",
+                    "action": "",
+                    "scheduled_date": "",
+                    "time": "",
+                    "source_text": normalized_clause,
+                    "status": "ambiguous",
+                    "warning": warning,
+                }
+            )
+            continue
+
+        ref = explicit_refs[0]
+        schedule_payload, schedule_warning = _extract_clause_schedule(normalized_clause)
+        action, action_warning = _resolve_clause_action(normalized_clause, schedule_payload)
+        warning = schedule_warning or action_warning
+        status = "ready" if not warning and action else "ambiguous"
+        if warning:
+            warnings.append(warning)
+
+        tasks.append(
+            {
+                "client_id": str(ref.get("client_id") or "").strip(),
+                "client_label": str(ref.get("client_id") or "").strip(),
+                "draft_id": str(ref.get("draft_id") or "").strip(),
+                "draft_label": str(ref.get("draft_name") or "").strip(),
+                "action": str(action or "").strip(),
+                "scheduled_date": str((schedule_payload or {}).get("scheduled_date") or "").strip(),
+                "time": str((schedule_payload or {}).get("time") or "").strip(),
+                "source_text": normalized_clause,
+                "status": status,
+                "warning": str(warning or "").strip(),
+            }
+        )
+
+    actionable = [task for task in tasks if task.get("client_id") or task.get("status") == "ambiguous"]
+    if not actionable:
+        return None
+
+    requires_confirmation = len([task for task in tasks if task.get("status") == "ready"]) > 1 or any(
+        str(task.get("action") or "").strip().lower() == "schedule" for task in tasks
+    )
+    return {
+        "tasks": tasks,
+        "warnings": warnings,
+        "requires_confirmation": requires_confirmation,
+    }
+
+
+def maybe_execute_explicit_batch_publish(agent: Agent, prompt: str, draft_refs: list[dict] | None = None) -> dict | None:
+    raw_prompt = str(prompt or "").strip()
+    if not raw_prompt:
+        return None
+
+    explicit_refs = collect_explicit_draft_targets(raw_prompt, draft_refs)
+    has_explicit_draft_syntax = bool(ROBUST_CLIENT_MENTION_RE.search(raw_prompt) and re.search(r"\bdraft\b", raw_prompt, re.IGNORECASE))
+    if has_explicit_draft_syntax and not explicit_refs:
+        return {
+            "reply": (
+                "Jarvis couldn't resolve those draft references. Use the exact client and draft labels shown in the dashboard, "
+                "for example `@[Veloura Studio] Draft · Fashion now`."
+            )
+        }
+
+    lower_prompt = raw_prompt.lower()
+    if not explicit_refs:
+        return None
+    if prompt_implies_scheduling(raw_prompt):
+        return None
+    if any(keyword in lower_prompt for keyword in ("approval", "approve", "whatsapp", "review")):
+        return None
+    if not contains_immediate_intent(raw_prompt) and not any(keyword in lower_prompt for keyword in BATCH_POST_WORDS):
+        return None
+
+    tool = getattr(agent, "tool_map", {}).get("trigger_pipeline_now")
+    if not tool:
+        return {"reply": "Jarvis could not access the immediate publish tool."}
+
+    messages: list[str] = []
+    for ref in explicit_refs:
+        tool_result = tool.execute(
+            client_id=ref["client_id"],
+            bundle_name=ref.get("draft_name"),
+            draft_id=ref.get("draft_id") or None,
+            topic=ref.get("draft_name") or None,
+        )
+        if isinstance(tool_result, dict):
+            messages.append(
+                str(
+                    tool_result.get("message")
+                    or tool_result.get("error")
+                    or f"Processed {ref['client_id']} · {ref.get('draft_name') or 'draft'}."
+                ).strip()
+            )
+        else:
+            messages.append(str(tool_result).strip())
+
+    return {"reply": summarize_multi_publish_results(messages)}
+
+
+def _within_one_edit(token: str, target: str) -> bool:
+    token = str(token or '').strip().lower()
+    target = str(target or '').strip().lower()
+    if token == target:
+        return True
+    if abs(len(token) - len(target)) > 1:
+        return False
+    if len(token) == len(target):
+        return sum(1 for a, b in zip(token, target) if a != b) <= 1
+    if len(token) + 1 == len(target):
+        token, target = target, token
+    i = j = edits = 0
+    while i < len(token) and j < len(target):
+        if token[i] == target[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        i += 1
+    return True
+
+
+def contains_immediate_intent(prompt: str) -> bool:
+    text = f' {str(prompt or '').strip().lower()} '
+    if not text.strip():
+        return False
+    if any(keyword in text for keyword in IMMEDIATE_WORDS):
+        return True
+    tokens = re.findall(r'[a-z]+', text)
+    if not any(token in {'post', 'publish'} for token in tokens):
+        return False
+    return any(_within_one_edit(token, 'now') for token in tokens)
 
 def prompt_implies_scheduling(prompt: str) -> bool:
     text = f" {str(prompt or '').strip().lower()} "
     if not text.strip():
         return False
-    if any(keyword in text for keyword in IMMEDIATE_WORDS):
+    if contains_immediate_intent(text):
         return False
     if " at " in text and TIME_WINDOW_RE.search(text):
         return True
@@ -67,27 +576,29 @@ def resolve_client_id(raw_id: str) -> str:
     e.g. input 'burger_grillz' -> returns 'Burger_grillz' if that's on disk.
     """
     raw_id = raw_id.strip()
-    # Direct match first (fast path)
-    if os.path.exists(f"clients/{raw_id}.json"):
+    if not raw_id:
         return raw_id
-    # Case-insensitive scan
-    if os.path.exists("clients"):
-        for f in os.listdir("clients"):
-            if f.lower() == f"{raw_id.lower()}.json":
-                return f[:-5]  # strip .json
-    return raw_id  # fallback to raw input
+    try:
+        client_ids = get_client_store().list_client_ids()
+    except Exception:
+        client_ids = []
+    for client_id in client_ids:
+        if client_id.lower() == raw_id.lower():
+            return client_id
+    normalized_raw = _normalize_client_match_text(raw_id)
+    for client_id in client_ids:
+        if _normalize_client_match_text(client_id) == normalized_raw:
+            return client_id
+    return raw_id
 
 def verify_meta_token(client_id: str):
     import requests
     access_token = os.getenv("META_ACCESS_TOKEN")
-    client_vault = f"clients/{client_id}.json"
-    if os.path.exists(client_vault):
-        try:
-            with open(client_vault, "r", encoding="utf-8") as f:
-                cdata = json.load(f)
-            access_token = cdata.get("meta_access_token", access_token)
-        except:
-            pass
+    try:
+        cdata = get_client_store().get_client(client_id) or {}
+        access_token = cdata.get("meta_access_token", access_token)
+    except Exception:
+        pass
             
     if not access_token:
         return "No Meta Access Token configured. Add it in the Dashboard Live Credentials first."
@@ -144,35 +655,178 @@ def extract_pipeline_failure_reason(output: str) -> str:
     return lines[-1]
 
 
-def resolve_saved_draft_reference(client_id: str, bundle_name: str | None = None, topic: str | None = None) -> dict | None:
-    queue_path = f"assets/{client_id}/queue.json"
-    if not os.path.exists(queue_path):
-        return None
+def extract_pipeline_status(output: str) -> tuple[str, str]:
+    raw = str(output or "")
+    status = "unknown"
+    message = ""
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("PIPELINE_STATUS:"):
+            status = stripped.split(":", 1)[1].strip().lower() or "unknown"
+        elif stripped.startswith("PIPELINE_MESSAGE:"):
+            message = stripped.split(":", 1)[1].strip()
+    return status, message
 
-    bundles = load_queue_data(queue_path).get("bundles", {})
-    if not isinstance(bundles, dict) or not bundles:
-        return None
 
-    draft_names = {str(name).strip().lower(): str(name) for name in bundles.keys() if str(name).strip()}
+def extract_pipeline_platform_breakdown(output: str) -> dict[str, dict[str, str]]:
+    platforms: dict[str, dict[str, str]] = {}
+    current_platform = ""
+    for raw_line in str(output or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("Facebook:"):
+            current_platform = "facebook"
+            status_text = line.split(":", 1)[1].strip()
+            platforms[current_platform] = {
+                "status": status_text.split()[0].lower() if status_text else "unknown",
+                "detail": status_text,
+            }
+            continue
+        if line.startswith("Instagram:"):
+            current_platform = "instagram"
+            status_text = line.split(":", 1)[1].strip()
+            platforms[current_platform] = {
+                "status": status_text.split()[0].lower() if status_text else "unknown",
+                "detail": status_text,
+            }
+            continue
+        if current_platform and line.startswith("Error:"):
+            platforms[current_platform]["error"] = line.replace("Error:", "").strip()
+            continue
+        if current_platform and line.startswith("Step:"):
+            platforms[current_platform]["step"] = line.replace("Step:", "").strip()
+            continue
+    return platforms
+
+
+def classify_pipeline_outcome(output: str, pipeline_status: str) -> tuple[str, str]:
+    status = str(pipeline_status or "unknown").strip().lower() or "unknown"
+    breakdown = extract_pipeline_platform_breakdown(output)
+    statuses = [str(item.get("status") or "").strip().lower() for item in breakdown.values() if item]
+    if status in {"error", "partial_success", "success"}:
+        return status, status
+    if statuses and all(item == "error" for item in statuses):
+        return "error", "derived"
+    if statuses and any(item == "published" for item in statuses) and any(item == "error" for item in statuses):
+        return "partial_success", "derived"
+    if statuses and all(item == "published" for item in statuses):
+        return "success", "derived"
+    return status, "raw"
+
+
+def summarize_pipeline_publish_success(output: str, client_id: str, pipeline_message: str) -> str:
+    breakdown = extract_pipeline_platform_breakdown(output)
+    parts = []
+    fb = breakdown.get("facebook", {})
+    ig = breakdown.get("instagram", {})
+    if fb.get("status") == "published":
+        parts.append(f"Facebook {fb.get('detail') or 'published'}")
+    if ig.get("status") == "published":
+        parts.append(f"Instagram {ig.get('detail') or 'published'}")
+    if parts:
+        return f"Pipeline completed successfully for {client_id}. " + " ".join(parts)
+    if pipeline_message:
+        return f"Pipeline completed successfully for {client_id}. {pipeline_message}"
+    return f"Pipeline completed successfully for {client_id}."
+
+
+def summarize_multi_publish_results(messages: list[str]) -> str:
+    cleaned = [str(item).strip() for item in (messages or []) if str(item).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return "Batch publish results:\n- " + "\n- ".join(cleaned)
+
+
+def resolve_saved_draft_reference(client_id: str, bundle_name: str | None = None, topic: str | None = None, draft_id: str | None = None) -> dict | None:
     for candidate, source in ((bundle_name, "bundle_name"), (topic, "topic")):
-        cleaned = str(candidate or "").strip()
-        if not cleaned:
+        payload = resolve_draft_payload(client_id, draft_name=candidate, draft_id=draft_id)
+        if not payload:
             continue
-        matched_name = draft_names.get(cleaned.lower())
-        if not matched_name:
-            continue
-        payload, images, videos = get_bundle_media_paths(client_id, queue_path, matched_name)
+        resolved_name = str(payload.get("bundle_name") or payload.get("draft_name") or candidate or "").strip()
+        payload, images, videos = get_draft_media_paths(
+            client_id,
+            draft_name=resolved_name,
+            draft_id=str(payload.get("draft_id") or draft_id or "").strip() or None,
+        )
         if not payload:
             continue
         return {
-            "bundle_name": matched_name,
+            "bundle_name": resolved_name,
             "payload": payload,
             "images": images,
             "videos": videos,
-            "matched_from": source,
+            "matched_from": "draft_id" if draft_id else source,
         }
 
+    if draft_id:
+        payload = resolve_draft_payload(client_id, draft_id=draft_id)
+        if payload:
+            resolved_name = str(payload.get("bundle_name") or payload.get("draft_name") or bundle_name or topic or "").strip()
+            payload, images, videos = get_draft_media_paths(
+                client_id,
+                draft_name=resolved_name,
+                draft_id=str(payload.get("draft_id") or draft_id or "").strip() or None,
+            )
+            if payload:
+                return {
+                    "bundle_name": resolved_name,
+                    "payload": payload,
+                    "images": images,
+                    "videos": videos,
+                    "matched_from": "draft_id",
+                }
+
     return None
+
+
+def extract_forced_draft_refs(prompt: str) -> list[dict]:
+    refs = []
+    raw = str(prompt or "")
+    for match in SMART_DRAFT_REF_RE.finditer(raw):
+        refs.append(
+            {
+                "client_id": resolve_client_id(str(match.group("client") or "").strip()),
+                "draft_id": str(match.group("draft_id") or "").strip(),
+                "draft_name": str(match.group("draft") or "").strip(),
+            }
+        )
+    return [ref for ref in refs if ref["client_id"] and ref["draft_id"]]
+
+
+def inject_forced_draft_reference(tool_input: dict, draft_refs: list[dict]) -> dict:
+    if not isinstance(tool_input, dict) or not draft_refs:
+        return tool_input
+    client_id = resolve_client_id(str(tool_input.get("client_id") or "").strip())
+    if not client_id:
+        return tool_input
+
+    refs_for_client = [ref for ref in draft_refs if ref.get("client_id") == client_id]
+    if not refs_for_client:
+        return tool_input
+
+    if str(tool_input.get("draft_id") or "").strip():
+        return tool_input
+
+    bundle_name = str(tool_input.get("bundle_name") or "").strip()
+    topic = str(tool_input.get("topic") or "").strip()
+
+    matched = None
+    if bundle_name:
+        matched = next((ref for ref in refs_for_client if ref.get("draft_name", "").lower() == bundle_name.lower()), None)
+    if matched is None and topic:
+        matched = next((ref for ref in refs_for_client if ref.get("draft_name", "").lower() == topic.lower()), None)
+    if matched is None and len(refs_for_client) == 1:
+        matched = refs_for_client[0]
+
+    if not matched:
+        return tool_input
+
+    enriched = dict(tool_input)
+    enriched["draft_id"] = matched["draft_id"]
+    if not bundle_name and matched.get("draft_name"):
+        enriched["bundle_name"] = matched["draft_name"]
+    return enriched
 
 class ListClientVaultTool:
     def get_schema(self):
@@ -192,10 +846,7 @@ class ListClientVaultTool:
         }
     def execute(self, client_id):
         client_id = resolve_client_id(client_id)
-        vault_path = f"assets/{client_id}"
-        if not os.path.exists(vault_path):
-            return {"error": f"Vault '{vault_path}' does not exist. No images found for '{client_id}'."}
-        files = os.listdir(vault_path)
+        files = [asset.get("filename") for asset in list_client_assets(client_id) if asset.get("filename")]
         if not files:
             return {"images": [], "message": "Vault is currently empty."}
         return {"client_id": client_id, "images": files}
@@ -218,14 +869,11 @@ class ReadVaultQueueTool:
         }
     def execute(self, client_id):
         client_id = resolve_client_id(client_id)
-        queue_path = f"assets/{client_id}/queue.json"
-        if not os.path.exists(queue_path):
-            return {"client_id": client_id, "bundles": {}, "message": "No creative drafts are currently queued."}
         try:
-            data = load_queue_data(queue_path).get("bundles", {})
+            data = list_client_drafts(client_id).get("bundles", {})
             return {"client_id": client_id, "bundles": data}
         except Exception:
-            return {"error": "Failed to parse queue.json"}
+            return {"error": "Failed to load saved creative drafts."}
 
 class ReadClientBriefTool:
     def get_schema(self):
@@ -245,11 +893,10 @@ class ReadClientBriefTool:
         }
     def execute(self, client_id):
         client_id = resolve_client_id(client_id)
-        profile_path = f"clients/{client_id}.json"
-        if not os.path.exists(profile_path):
-            return {"error": f"Profile '{profile_path}' not found."}
-        with open(profile_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        payload = get_client_store().get_client(client_id)
+        if not payload:
+            return {"error": f"Profile '{client_id}' not found."}
+        return payload
 
 class AutonomousScheduleTool:
     def get_schema(self):
@@ -265,6 +912,7 @@ class AutonomousScheduleTool:
                         "topic": {"type": "string", "description": "The focus/topic of the scheduled post"},
                         "image": {"type": "string", "description": "(Legacy) The exact image filename from the vault to attach (e.g. img_123.jpg)"},
                         "bundle_name": {"type": "string", "description": "The exact creative draft name from the vault queue to attach (for example 'Reel 1', 'Carousel 2', or 'Image Post 3'). Use this instead of raw filenames when a saved draft is requested."},
+                        "draft_id": {"type": "string", "description": "Stable draft identifier when a saved creative draft was selected from the dashboard draft picker."},
                         "days": {
                             "type": "array", 
                             "items": {"type": "string"},
@@ -280,7 +928,7 @@ class AutonomousScheduleTool:
                 }
             }
         }
-    def execute(self, client_id, days, post_time, topic=None, image=None, bundle_name=None, scheduled_date=None):
+    def execute(self, client_id, days, post_time, topic=None, image=None, bundle_name=None, scheduled_date=None, draft_id=None):
         client_id = resolve_client_id(client_id)
         
         # PRE-FLIGHT SAFETY CHECK
@@ -292,7 +940,7 @@ class AutonomousScheduleTool:
             topic = f"Scheduled {bundle_name}" if bundle_name else "Scheduled Post"
             
         try:
-            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic)
+            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic, draft_id=draft_id)
             if resolved_draft:
                 bundle_name = resolved_draft["bundle_name"]
                 payload = resolved_draft["payload"]
@@ -313,7 +961,6 @@ class AutonomousScheduleTool:
             }
             
             if bundle_name:
-                queue_path = f"assets/{client_id}/queue.json"
                 if resolved_draft:
                     payload = resolved_draft["payload"]
                     images = resolved_draft["images"]
@@ -323,19 +970,21 @@ class AutonomousScheduleTool:
                     if videos:
                         rule["videos"] = videos
                     rule["draft_name"] = bundle_name
+                    if payload.get("draft_id"):
+                        rule["draft_id"] = payload.get("draft_id")
                     rule["media_kind"] = payload["bundle_type"]
-                elif os.path.exists(queue_path):
-                    payload, images, videos = get_bundle_media_paths(client_id, queue_path, bundle_name)
+                else:
+                    payload, images, videos = get_draft_media_paths(client_id, bundle_name, draft_id=draft_id)
                     if not payload:
                         return {"error": f"Creative draft '{bundle_name}' not found in the client's vault queue. Use read_vault_queue first to inspect the available draft names."}
                     if images:
                         rule["images"] = images
                     if videos:
                         rule["videos"] = videos
-                    rule["draft_name"] = bundle_name
+                    rule["draft_name"] = str(payload.get("bundle_name") or bundle_name).strip()
+                    if payload.get("draft_id"):
+                        rule["draft_id"] = payload.get("draft_id")
                     rule["media_kind"] = payload["bundle_type"]
-                else:
-                    return {"error": "No queue.json found for this client."}
             elif image:
                 rule["images"] = [f"assets/{client_id}/{image}"]
                 rule["media_kind"] = "image_single"
@@ -374,7 +1023,7 @@ class RequestApprovalTool:
             "type": "function",
             "function": {
                 "name": "request_client_approval",
-                "description": "CRITICAL: ALWAYS USE THIS TOOL whenever you are told to schedule a post, UNLESS explicitly told to 'skip approval' or 'force schedule'. Drafts the post payload, queues it in pending_approvals.json, and pings the Agency Owner via WhatsApp with native Approve/Reject interactive buttons.",
+                "description": "CRITICAL: ALWAYS USE THIS TOOL whenever you are told to schedule a post, UNLESS explicitly told to 'skip approval' or 'force schedule'. Drafts the post payload, stores it in the approval queue, and pings the Agency Owner via WhatsApp with native Approve/Reject interactive buttons.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -384,6 +1033,7 @@ class RequestApprovalTool:
                         "scheduled_date": {"type": "string", "description": "Preferred one-off calendar date in YYYY-MM-DD after resolving phrases like next Friday or April 21."},
                         "time": {"type": "string", "description": "Time string e.g. '04:30 PM'"},
                         "bundle_name": {"type": "string", "description": "If scheduling a saved creative draft, the exact draft name from the queue (for example 'Reel 1' or 'Carousel 2')."},
+                        "draft_id": {"type": "string", "description": "Stable draft identifier when a saved creative draft was selected from the dashboard draft picker."},
                         "image": {"type": "string", "description": "If scheduling a single image, the filename"}
                     },
                     "required": ["client_id", "topic", "days", "time"]
@@ -391,14 +1041,14 @@ class RequestApprovalTool:
             }
         }
         
-    def execute(self, client_id, topic, days, time, bundle_name=None, image=None, scheduled_date=None):
+    def execute(self, client_id, topic, days, time, bundle_name=None, image=None, scheduled_date=None, draft_id=None, approval_routing_override=None):
         try:
             import uuid
-            from webhook_server import send_interactive_whatsapp_approval, get_agency_config
+            from webhook_server import build_approval_preview, get_agency_config, get_approval_routing_mode, normalize_approval_routing_mode, send_pending_approval_to_whatsapp
 
             client_id = resolve_client_id(client_id)
             caption_preview_line = ""
-            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic)
+            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic, draft_id=draft_id)
             if resolved_draft:
                 bundle_name = resolved_draft["bundle_name"]
                 payload = resolved_draft["payload"]
@@ -422,7 +1072,6 @@ class RequestApprovalTool:
             }
 
             if bundle_name:
-                queue_path = f"assets/{client_id}/queue.json"
                 if resolved_draft:
                     payload = resolved_draft["payload"]
                     images = resolved_draft["images"]
@@ -432,6 +1081,8 @@ class RequestApprovalTool:
                     if videos:
                         rule["videos"] = videos
                     rule["draft_name"] = bundle_name
+                    if payload.get("draft_id"):
+                        rule["draft_id"] = payload.get("draft_id")
                     rule["media_kind"] = payload["bundle_type"]
                     if payload.get("caption_text"):
                         rule["caption_text"] = payload.get("caption_text", "")
@@ -445,15 +1096,17 @@ class RequestApprovalTool:
                             if len(preview_text) > 110:
                                 clipped += "..."
                             caption_preview_line = f"Caption Preview: {clipped}\n"
-                elif os.path.exists(queue_path):
-                    payload, images, videos = get_bundle_media_paths(client_id, queue_path, bundle_name)
+                else:
+                    payload, images, videos = get_draft_media_paths(client_id, bundle_name, draft_id=draft_id)
                     if not payload:
                         return {"error": f"Creative draft '{bundle_name}' not found."}
                     if images:
                         rule["images"] = images
                     if videos:
                         rule["videos"] = videos
-                    rule["draft_name"] = bundle_name
+                    rule["draft_name"] = str(payload.get("bundle_name") or bundle_name).strip()
+                    if payload.get("draft_id"):
+                        rule["draft_id"] = payload.get("draft_id")
                     rule["media_kind"] = payload["bundle_type"]
                     if payload.get("caption_text"):
                         rule["caption_text"] = payload.get("caption_text", "")
@@ -467,67 +1120,53 @@ class RequestApprovalTool:
                             if len(preview_text) > 110:
                                 clipped += "..."
                             caption_preview_line = f"Caption Preview: {clipped}\n"
-                else:
-                    return {"error": "No queue.json found for this client."}
             elif image:
                 rule["images"] = [f"assets/{client_id}/{image}"]
                 rule["media_kind"] = "image_single"
 
             approval_id = uuid.uuid4().hex[:8].upper()
             rule["approval_id"] = approval_id
+            override_mode = normalize_approval_routing_mode(approval_routing_override) if approval_routing_override else ""
+            rule["approval_routing"] = override_mode or get_approval_routing_mode()
+            rule["whatsapp_sent"] = False
 
-            pending = []
-            if os.path.exists("pending_approvals.json"):
-                with open("pending_approvals.json", "r", encoding="utf-8") as f:
-                    try:
-                        pending = json.load(f)
-                    except Exception:
-                        pending = []
-
-            pending.append(rule)
-
-            with open("pending_approvals.json", "w", encoding="utf-8") as f:
-                json.dump(pending, f, indent=4)
+            save_pending_approval(rule)
 
             owner_phone = get_agency_config().get("owner_phone", "")
+            routing_mode = rule["approval_routing"]
+            if routing_mode == "desktop_first":
+                return {
+                    "status": "success",
+                    "message": f"Draft prepared. Approval {approval_id} is ready in Jarvis for desktop review.",
+                    "approval_id": approval_id,
+                    "job_id": rule["job_id"],
+                    "whatsapp_sent": False,
+                }
+
             if owner_phone:
-                display_client = client_id.replace("_", " ").replace("-", " ").strip().title()
-                image_count = len(rule.get("images", []))
-                video_count = len(rule.get("videos", []))
-                if video_count:
-                    asset_label = "1-video post"
-                elif image_count > 1:
-                    asset_label = f"{image_count}-image carousel"
-                elif image_count == 1:
-                    asset_label = "1-image post"
-                else:
-                    asset_label = "Media ready"
-                scheduling_label = format_schedule_label(time, scheduled_date=rule.get("scheduled_date"), days=rule.get("days"))
-                creative_focus = f"{bundle_name or image or topic} spotlight"
-                preview = (
-                    f"{display_client}\n"
-                    f"Your next creative is staged and ready for final approval.\n\n"
-                    f"Go-live: {scheduling_label}\n"
-                    f"Assets: {asset_label}\n"
-                    f"Focus: {creative_focus}\n"
-                    f"{caption_preview_line}"
-                    f"Select the release path below."
-                )
-                send_result = send_interactive_whatsapp_approval(owner_phone, approval_id, preview)
+                send_result = send_pending_approval_to_whatsapp(approval_id, phone=owner_phone)
                 if send_result.get("success"):
                     return {
                         "status": "success",
-                        "message": f"Draft prepared. Sent approval card {approval_id} to the agency owner for review.",
+                        "message": f"Draft prepared. Sent approval card {approval_id} to the agency owner's WhatsApp mobile control lane.",
                         "approval_id": approval_id,
                         "job_id": rule["job_id"],
+                        "whatsapp_sent": True,
                     }
                 return {
-                    "error": f"Draft saved, but WhatsApp approval send failed: {send_result.get('error', 'Unknown Meta API failure.')}",
+                    "status": "partial_success",
+                    "message": f"Approval {approval_id} is ready in Jarvis, but WhatsApp send failed: {send_result.get('error', 'Unknown Meta API failure.')}",
                     "approval_id": approval_id,
                     "job_id": rule["job_id"],
+                    "whatsapp_sent": False,
                 }
-            else:
-                return {"error": "Draft saved, but could NOT send WhatsApp. OWNER_PHONE is missing from Agency Settings."}
+            return {
+                "status": "partial_success",
+                "message": f"Approval {approval_id} is ready in Jarvis, but OWNER_PHONE is missing from Agency Settings.",
+                "approval_id": approval_id,
+                "job_id": rule["job_id"],
+                "whatsapp_sent": False,
+            }
         except Exception as e:
             return {"error": str(e)}
 
@@ -589,13 +1228,14 @@ class TriggerPipelineNowTool:
                         "client_id": {"type": "string", "description": "The target CRM client ID"},
                         "topic": {"type": "string", "description": "The topic/prompt for the post"},
                         "image": {"type": "string", "description": "Optional exact image filename from the vault"},
-                        "bundle_name": {"type": "string", "description": "Optional creative draft name from the queue (for example 'Reel 1', 'Carousel 2', or 'Image Post 3')."}
+                        "bundle_name": {"type": "string", "description": "Optional creative draft name from the queue (for example 'Reel 1', 'Carousel 2', or 'Image Post 3')."},
+                        "draft_id": {"type": "string", "description": "Stable draft identifier when a saved creative draft was selected from the dashboard draft picker."}
                     },
                     "required": ["client_id"]
                 }
             }
         }
-    def execute(self, client_id, topic=None, image=None, bundle_name=None, post_time=None, time=None, days=None, scheduled_date=None, **kwargs):
+    def execute(self, client_id, topic=None, image=None, bundle_name=None, post_time=None, time=None, days=None, scheduled_date=None, draft_id=None, **kwargs):
         import subprocess, sys
         client_id = resolve_client_id(client_id)
         
@@ -605,7 +1245,7 @@ class TriggerPipelineNowTool:
             return {"error": f"❌ PRE-FLIGHT VERIFICATION FAILED: {token_err}\nTell the user they must update the client's Live Credentials in the dashboard securely before running this pipeline."}
             
         try:
-            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic)
+            resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic, draft_id=draft_id)
             if resolved_draft:
                 bundle_name = resolved_draft["bundle_name"]
                 payload = resolved_draft["payload"]
@@ -629,7 +1269,6 @@ class TriggerPipelineNowTool:
             cmd = [sys.executable, "pipeline.py", "--client", client_id, "--topic", topic]
             
             if bundle_name:
-                queue_path = f"assets/{client_id}/queue.json"
                 if resolved_draft:
                     images = resolved_draft["images"]
                     videos = resolved_draft["videos"]
@@ -638,8 +1277,8 @@ class TriggerPipelineNowTool:
                     for video in videos:
                         cmd += ["--video", video]
                     cmd += ["--draft-name", bundle_name]
-                elif os.path.exists(queue_path):
-                    payload, images, videos = get_bundle_media_paths(client_id, queue_path, bundle_name)
+                else:
+                    payload, images, videos = get_draft_media_paths(client_id, bundle_name, draft_id=draft_id)
                     if not payload:
                         return {"error": f"Creative draft '{bundle_name}' not found."}
                     for img in images:
@@ -647,8 +1286,6 @@ class TriggerPipelineNowTool:
                     for video in videos:
                         cmd += ["--video", video]
                     cmd += ["--draft-name", bundle_name]
-                else:
-                    return {"error": "No queue.json found for this client."}
             elif image:
                 cmd += ["--image", f"assets/{client_id}/{image}"]
             
@@ -657,20 +1294,43 @@ class TriggerPipelineNowTool:
             
             output = result.stdout + result.stderr
             
-            # Detect publish failures from output regardless of exit code
-            has_publish_error = any(err in output for err in [
-                'Publishing failed', 'error', 'Error validating', 
-                'FAILED', 'Error:', 'status": "error'
-            ])
-            
-            if result.returncode != 0 or has_publish_error:
+            pipeline_status, pipeline_message = extract_pipeline_status(output)
+            normalized_status, _ = classify_pipeline_outcome(output, pipeline_status)
+
+            if result.returncode != 0 or normalized_status == "error":
                 reason = extract_pipeline_failure_reason(output)
                 return {
                     "error": f"Immediate publish failed for {client_id}: {reason}",
                     "output": output[-1500:]
                 }
+            if normalized_status == "partial_success":
+                breakdown = extract_pipeline_platform_breakdown(output)
+                fb = breakdown.get("facebook", {})
+                ig = breakdown.get("instagram", {})
+                parts = []
+                if fb.get("status") == "published":
+                    parts.append("Facebook posted successfully")
+                elif fb.get("status") == "error":
+                    parts.append(f"Facebook failed: {fb.get('error') or fb.get('detail')}")
+                if ig.get("status") == "published":
+                    parts.append("Instagram posted successfully")
+                elif ig.get("status") == "error":
+                    ig_detail = ig.get("error") or ig.get("detail") or "Instagram failed during publish."
+                    if ig.get("step"):
+                        ig_detail = f"{ig_detail} (step: {ig.get('step')})"
+                    parts.append(f"Instagram failed: {ig_detail}")
+                return {
+                    "status": "partial_success",
+                    "message": "Immediate publish partially succeeded for "
+                    f"{client_id}. " + (" ".join(parts) if parts else (pipeline_message or "At least one platform published successfully while another failed.")),
+                    "output": output[-1500:],
+                }
             else:
-                return {"status": "success", "message": f"Pipeline completed successfully for {client_id}.", "output": output[-1500:]}
+                return {
+                    "status": "success",
+                    "message": summarize_pipeline_publish_success(output, client_id, pipeline_message),
+                    "output": output[-1500:],
+                }
         except subprocess.TimeoutExpired:
             return {"error": f"Immediate publish failed for {client_id}: Pipeline timed out after 120 seconds."}
         except Exception as e:
@@ -699,12 +1359,9 @@ class MetaInsightsScannerTool:
         client_id = resolve_client_id(client_id)
         
         # Load client credentials
-        client_file = f"clients/{client_id}.json"
-        if not os.path.exists(client_file):
+        cdata = get_client_store().get_client(client_id)
+        if not cdata:
             return {"error": f"Client '{client_id}' not found. Register them in the dashboard first."}
-        
-        with open(client_file, "r", encoding="utf-8") as f:
-            cdata = json.load(f)
         
         access_token = cdata.get("meta_access_token", os.getenv("META_ACCESS_TOKEN"))
         ig_user_id = cdata.get("instagram_account_id", os.getenv("META_IG_USER_ID"))
@@ -911,7 +1568,10 @@ class OrchestratorAgent(Agent):
             ReadCronScheduleTool(), ReadPipelineStreamTool(), TriggerPipelineNowTool(), MetaInsightsScannerTool(),
             WebSearchTool(), RequestApprovalTool()
         ]
-        super().__init__(tools)
+        jarvis_model = os.getenv("JARVIS_MODEL", "").strip()
+        if not jarvis_model:
+            jarvis_model = "openai/gpt-4o-mini" if os.getenv("OPENROUTER_API_KEY") else "gpt-4o-mini"
+        super().__init__(tools, model=jarvis_model)
         self.system_message = (
             "You are JARVIS, the highly intelligent Lead Orchestrator for Orionx Agency OS. "
             f"Today's date is {today_context}. Use this exact current date when resolving relative scheduling phrases. "
@@ -923,6 +1583,7 @@ class OrchestratorAgent(Agent):
             "2. Whenever you are asked to 'schedule' a post, YOU MUST use `request_client_approval` by default. This is the safe, production-grade workflow. "
             "3. ONLY use `commit_autonomous_schedule` if the user explicitly uses keywords like 'autonomous', 'force', 'skip approval', or 'bypass safety'. "
             "4. If requested to schedule multiple creative drafts, execute the chosen scheduling/approval tool MULTIPLE TIMES IN PARALLEL. DO NOT PROMPT THE USER BETWEEN CALLS. "
+            "4b. If requested to immediately publish multiple drafts or multiple clients now, execute `trigger_pipeline_now` MULTIPLE TIMES IN THE SAME TURN, once per requested draft/client, then summarize all outcomes together. "
             "5. CALENDAR RULE: For one-off posts, ALWAYS resolve the user's date intent into `scheduled_date` using YYYY-MM-DD. Examples include today, tomorrow, this Friday, next Friday, April 21, 4/21, or Tuesday 21. "
             "6. Use `days` only for recurring weekly schedules or as a compatibility field. If the user wants a specific calendar release, prefer `scheduled_date`. "
             "7. If the user explicitly repeats the same creative draft name in their message, DO NOT SCHEDULE IT TWICE. Deduplicate their intent and only call the tool ONCE per unique draft. "
@@ -936,15 +1597,22 @@ class OrchestratorAgent(Agent):
 
 _global_agent = OrchestratorAgent()
 
-def run_orchestrator(user_input: str) -> str:
+def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, original_request: str | None = None):
     global _global_agent
     agent = _global_agent
-    original_request = user_input
+    # Reset message history per request to prevent unbounded memory growth (C-06)
+    agent.messages = []
+    original_request = original_request or user_input
+    forced_draft_refs = collect_explicit_draft_targets(original_request, draft_refs) or draft_refs or extract_forced_draft_refs(original_request)
+    explicit_batch_result = maybe_execute_explicit_batch_publish(agent, original_request, forced_draft_refs)
+    if explicit_batch_result is not None:
+        return explicit_batch_result
     max_turns = 10
     i = 0
     repeated_tool_rounds = 0
     last_tool_fingerprint = None
     last_error_message = None
+    last_structured_action = None
     
     while i < max_turns:
         i += 1
@@ -960,9 +1628,20 @@ def run_orchestrator(user_input: str) -> str:
             agent.messages.append(message)
             current_fingerprint_parts = []
             round_errors = []
+            immediate_replies = []
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
-                tool_input = json.loads(tool_call.function.arguments)
+                try:
+                    tool_input = json.loads(tool_call.function.arguments)
+                except (json.JSONDecodeError, TypeError) as parse_err:
+                    logger.error(f"Orchestrator | Failed to parse tool arguments for {tool_name}: {parse_err}")
+                    agent.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps({"error": f"Invalid tool arguments from LLM for {tool_name}. Retry the request."})
+                    })
+                    continue
+                tool_input = inject_forced_draft_reference(tool_input, forced_draft_refs)
                 logger.info(f"Orchestrator invoking physical Python tool: {tool_name} | constraints: {tool_input}")
                 current_fingerprint_parts.append(
                     json.dumps({"tool": tool_name, "input": tool_input}, sort_keys=True, ensure_ascii=False)
@@ -982,15 +1661,44 @@ def run_orchestrator(user_input: str) -> str:
                     else:
                         tool_result = {"error": f"Physical Tool {tool_name} not mounted."}
                 except Exception as e:
-                    import traceback
+                    logger.error(f"Tool {tool_name} crashed: {type(e).__name__}: {str(e)}", exc_info=True)
                     tool_result = {
-                        "error": f"{tool_name} crashed: {type(e).__name__}: {str(e)}",
-                        "traceback": traceback.format_exc(),
+                        "error": f"{tool_name} encountered an internal error: {type(e).__name__}: {str(e)}",
                     }
 
                 if isinstance(tool_result, dict) and tool_result.get("error"):
                     round_errors.append(str(tool_result["error"]))
                     last_error_message = str(tool_result["error"])
+                elif (
+                    tool_name == "request_client_approval"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("status") == "success"
+                    and tool_result.get("approval_id")
+                ):
+                    last_structured_action = {
+                        "type": "approval_request",
+                        "approval_id": str(tool_result.get("approval_id") or "").strip(),
+                        "job_id": str(tool_result.get("job_id") or "").strip(),
+                        "message": str(tool_result.get("message") or "").strip(),
+                    }
+                elif (
+                    tool_name == "trigger_pipeline_now"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("status") == "partial_success"
+                ):
+                    immediate_replies.append(str(tool_result.get("message") or "").strip())
+                elif (
+                    tool_name == "trigger_pipeline_now"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("status") == "success"
+                ):
+                    immediate_replies.append(str(tool_result.get("message") or "").strip())
+                elif (
+                    tool_name == "trigger_pipeline_now"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("error")
+                ):
+                    immediate_replies.append(str(tool_result.get("error") or "").strip())
                     
                 agent.messages.append({
                     "role": "tool",
@@ -1007,13 +1715,26 @@ def run_orchestrator(user_input: str) -> str:
 
             if repeated_tool_rounds >= 1 and round_errors:
                 if "client" in " ".join(round_errors).lower():
-                    return "Jarvis got stuck resolving the request because the target client context was unclear. Please retry with an explicit client mention like `@burger_grillz schedule Reel 1 for tomorrow at 12:10 PM`."
-                return round_errors[-1]
+                    return {
+                        "reply": "Jarvis got stuck resolving the request because the target client context was unclear. Please retry with an explicit client mention like `@burger_grillz schedule Reel 1 for tomorrow at 12:10 PM`."
+                    }
+                return {"reply": round_errors[-1]}
+
+            if immediate_replies:
+                return {"reply": summarize_multi_publish_results(immediate_replies)}
 
             user_input = "" 
         else:
-            return message.content
+            final_reply = str(message.content or "").strip()
+            if not final_reply and last_structured_action:
+                final_reply = str(last_structured_action.get("message") or "").strip()
+            payload = {"reply": final_reply}
+            if last_structured_action:
+                payload["action"] = last_structured_action
+            return payload
             
     if last_error_message:
-        return last_error_message
-    return "Jarvis reached its orchestration safety limit without resolving the request. Retry with a more explicit scheduling target, preferably including the client mention and exact date."
+        return {"reply": last_error_message}
+    return {
+        "reply": "Jarvis reached its orchestration safety limit without resolving the request. Retry with a more explicit scheduling target, preferably including the client mention and exact date."
+    }

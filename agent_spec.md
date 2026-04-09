@@ -1,125 +1,114 @@
-# AGENT SPECS.
-## 6 Questions to answer before we build.
+# Jarvis System Spec
 
-Q1: What is the agent's specific goal?
+This is the current high-level system spec, not the original early brainstorm.
 
-Answer: 
-Automatically generate Arabic, SEO-friendly captions, schedule and publish posts to Facebook and Instagram, and manage WhatsApp-based client follow-ups — across 3 client accounts — without human intervention. 
+## Goal
 
+Jarvis is a multi-client agency operating system that helps a marketing agency:
+- onboard clients
+- store brand memory
+- upload and organize creative assets
+- create and manage drafts
+- generate captions
+- schedule or immediately publish to Facebook and Instagram
+- route approvals through desktop chat or WhatsApp
 
-Q2 2. TOOLS REQUIRED:
+The main product is not �many disconnected tools�. The main product is one operator lane centered on Jarvis chat.
 
-Tool 1: LLM (Claude Opus 4.6 or GPT-5)
-Function: Arabic caption generation, SEO optimization, content ideation
-Access: Read-Write
-External System: Anthropic / OpenAI API
-Status: Confirmed
-While we build: we use a free openrouter model like gpt-4o-mini for now, later we can upgrade to opus 4.6 or gpt-5.3 after client has paid for it.
+## Core Product Rules
 
-Tool 2: Meta Graph API
-Function: Schedule + publish posts to Facebook & Instagram
-Access: Read-Write
-External System: Meta Business Suite
-Status: Confirmed
+1. Jarvis chat is the front door.
+2. WhatsApp is the mobile control lane, not a second dashboard.
+3. Schedule is an oversight surface, not a mandatory workflow detour.
+4. Approvals must be validated before they become executable jobs.
+5. Jarvis must report real platform outcomes, not AI filler.
 
-Tool 3: WhatsApp Business API (or Baileys/WA-Web)
-Function: Read group messages, send follow-up responses
-Access: Read-Write
-External System: WhatsApp
-Status: Confirmed
+## Main Agents / Roles
 
-Tool 4: Cron / Heartbeat Scheduler
-Function: Trigger agent on defined posting schedule
-Access: Read-Write
-Internal System: Internal scheduler
-Status: Confirmed
+### Lead Orchestrator
+- interprets user intent
+- distinguishes schedule vs immediate publish
+- mounts client and draft context
+- creates approval requests
+- returns structured action metadata to the frontend
 
-Tool 5: Brand Voice Store
-Function: Stores per-client tone, keywords, SEO tags
-Access: Read-Write
-External System: Local DB / JSON / Notion
-Status: Confirmed execept that we'll use a made up brand voice for now in which we create and test with since we dont have any client data yet
+### Client Synthesizer
+- turns raw intake text into client profile structure
+- extracts brand voice, services, audience, SEO cues, and operating defaults
+- currently strongest for Arabic-first content brands
 
-Tool 6: Logging Layer
-Function: Records every action taken per client per run
-Access: Read-Write
-External System: Internal (DB or Sheet)
-Status: Confirmed in principle
+### Caption Agent
+- generates brand-aware captions from client context and draft/topic context
+- currently Arabic-first
+- should become bilingual next
 
-Tool 7: Briefing/Notification Channel
-Function: Sends owner a summary after each run
-Access: Read-Write
-External System: NOT SPECIFIED⚠ 
+### Publish Agent
+- validates media and account readiness
+- performs per-platform delivery
+- returns honest platform breakdown
 
+### Scheduler
+- runs future jobs
+- tracks active and history states
+- marks failed jobs cleanly
 
+### WhatsApp Lane
+- sends owner approvals and controlled mobile actions
+- respects the 24-hour reply window
 
-3. STARTING INFORMATION:
+## Current Workflow
 
-Answer: The following must be provided before the agent could run, if any of these are missing the agent halts and logs a missing-input error:
+1. Client is created or synthesized.
+2. Profile + credentials are saved.
+3. Assets are uploaded into that client�s vault.
+4. Draft is created from the selected asset(s).
+5. User asks Jarvis to schedule or post.
+6. If approval is needed, Jarvis returns an inline approval card.
+7. User approves in chat or routes to WhatsApp.
+8. Approval is preflight-validated.
+9. Job is scheduled or published.
+10. Jarvis reports exact outcome.
 
-1. Per Client: Facebook PAGE id + Instagram business account id + meta api access token
-2. Per Client: WhatsApp Group ID's designated for follow ups.
-3. Per Client: Brand voice profile (tone descriptors, Arabic dialect preference, banned words, key services)
-4. Per Client: SEO keyword list (arabic) for caption ingestion
-5. Per run: Raw content assets (images/videos) + campaign brief — provided by the agency
-6. Global: Posting schedule (days, times per client)
-7. Global: LLM API key (we'll use a free openrouter model like gpt-4o-mini for now, later we can upgrade to opus 4.6 or gpt-5.3 after client has paid for it)
+## Storage Model
 
+### Active backend
+- Supabase
 
+### Fallback
+- JSON remains available for recovery / migration use
 
-4. WHAT SUCCESS LOOKS LIKE
-Caption Generation:
-Arabic caption, 150–300 characters [DEFAULT — not confirmed by client], 3–5 Arabic hashtags, minimum 1 target SEO keyword embedded naturally, matched to provided brand voice profile.
-[Source: "captions needs to be arabic and SEO friendly"]
-Post Scheduling & Publishing:
-Post (image/video + caption) published to Facebook Page AND Instagram Business account at the scheduled time. Meta API confirmation ID logged per post.
-[Source: "schedule post… in meta" + "Facebook, Instagram" — Q1 answer]
-WhatsApp Follow-Up:
-Inbound message in client group detected → response sent within [DEFAULT: 5 minutes — not confirmed by client], in Arabic, in the client's brand voice. Message thread logged with timestamp, content, and client name.
-[Source: "groups with the clients for follow up and thats the most headache"]
-Run Briefing:
-After each completed run, owner receives a structured summary including: posts published (per client), captions generated, follow-ups handled, and any errors.
-Channel: NOT SPECIFIED — needs clarification.
+### Important data areas
+- client profiles
+- brand profiles
+- schedule jobs
+- approval records
+- publish runs
+- asset vault storage
 
+## What Has Been Simplified
 
+### Removed as primary workflow
+- visible Approval Center as a required step
 
+### Kept
+- underlying approval model
+- schedule oversight
+- WhatsApp control path
 
+This is intentional. The premium version of the product should reduce operator hopping, not increase it.
 
+## Current Risks
 
+1. Rotating public tunnel URL can break Meta media fetches.
+2. Bilingual brief/caption support is still incomplete.
+3. The frontend is a large single-file dashboard and requires disciplined sectioning when edited.
 
+## Next Major Capability
 
-5. WHAT FAILURE LOOKS LIKE
-Failure ModeTriggerAgent ActionLogged?Missing content assetsAgency didn't upload image/video before runHalt that client's posting task, continue othersYes — client name + timestampMeta API auth failureToken expired or revokedHalt posting, escalate to human immediatelyYes — error code + clientWhatsApp session dropWA connection lost mid-sessionRetry × 3 (5-min intervals), then escalateYes — retry count + timestampsLLM returns non-Arabic outputModel produces English or mixed contentRetry with explicit Arabic-only prompt × 2, then flag for human reviewYes — raw LLM output savedCaption exceeds character limitLLM over-generatesAuto-truncate at nearest sentence boundary, flag in logYesNo brand voice profile foundNew client onboarded without profile setupHalt all tasks for that clientYes — hard stop, no guessing
+### Bilingual support
+Needed behavior:
+- synthesize English briefs correctly
+- still allow Arabic captions when the agency wants Arabic output
+- support English-only, Arabic-only, or bilingual caption output per client / per draft
 
-
-
-
-
-
-6. WHEN TO ASK A HUMAN
-TriggerEscalation ActionMeta API token expired for any clientImmediate alert — human must re-auth before next runWhatsApp session fails after 3 retriesAlert sent — human must restart sessionInbound WA message classified as complaint or legal threat (sentiment threshold)Do NOT auto-respond — flag for human review immediatelyBrand voice profile missing for a clientBlock that client's entire run until profile is submittedLLM produces off-brand or inappropriate Arabic content (2nd retry fail)Hold caption, send draft to human for approvalNotification channel:NOT SPECIFIED — needs clarification. Could be WhatsApp message to owner, email summary, or Google Sheet dashboard
-[Source: "gives you briefings once finished" — channel undefined]
-
-WHAT YOU CAN BUILD NOW vs WHAT NEEDS CLARIFICATION
-✅ BUILD NOW — Unblocked
-
-Caption generation module (Arabic, SEO-injected, brand-voice-matched)
-Meta Graph API integration for Facebook + Instagram posting
-Cron-based scheduling engine (per client, per platform)
-WhatsApp listener + auto-responder (brand voice, Arabic)
-Per-client brand voice profile schema + storage
-Logging layer (all actions, errors, timestamps)
-Failure handling logic (retry, halt, escalate triggers)
-
- — Needs Clarification Before Building
-Blocked ItemWhat's MissingOwner briefing / notification systemQ5 was not answered — WhatsApp? Email? Sheet?Brand voice profile storage formatNotion? JSON file? Google Sheet? Needs decisionWhatsApp API methodPersonal number (Baileys/unofficial) vs WhatsApp Business API (Meta-approved) — legal and cost implications differ significantlyPost frequency / scheduleDays and times per client not definedArabic dialect preferenceGulf? Levantine? Modern Standard Arabic? Affects caption quality
-
-Spec produced under Principle 1: no invented details. All claims sourced. All gaps named. Sonnet 4.6Extended
-
-
-
-
-
-
-⚠ BLOCKED — Needs Clarification Before Building
-Blocked ItemWhat's MissingOwner briefing / notification systemQ5 was not answered — WhatsApp? Email? Sheet?Brand voice profile storage formatNotion? JSON file? Google Sheet? Needs decisionWhatsApp API methodPersonal number (Baileys/unofficial) vs WhatsApp Business API (Meta-approved) — legal and cost implications differ significantlyPost frequency / scheduleDays and times per client not definedArabic dialect preferenceGulf? Levantine? Modern Standard Arabic? Affects caption quality
+This is the next meaningful product upgrade before broader deployment.

@@ -1,0 +1,530 @@
+
+
+==== FEATURES.md
+# Jarvis Feature Registry
+
+This file is the current capability map for Jarvis as of the latest working state of the repo.
+
+## 1. Product Flow
+
+### Primary flow
+- Jarvis chat is the main command surface
+- inline approval cards handle approve / move time / discard / WhatsApp routing
+- schedule page is for oversight and history
+- vaults and client config support the content workflow
+
+### Secondary flow
+- WhatsApp acts as a mobile control lane for:
+  - owner approvals
+  - urgent review
+  - failure alerts
+  - executive summaries
+
+## 2. Client Onboarding
+
+- AI client synthesis from pasted brief or uploaded text file
+- client profile persistence
+- separated brand profile and live credential storage
+- client config editing from dashboard
+- no auto-popup operating brief after save
+
+## 3. Brand Memory
+
+- stored tone / audience / services / SEO keywords / hashtag bank
+- brand voice examples
+- client-isolated profile loading
+- Jarvis context mounting through `@client`
+
+## 4. Asset Vaults
+
+- per-client asset isolation
+- upload multiple files
+- images, carousels, and videos
+- old vault videos can be repaired for Meta
+- new uploaded videos are normalized automatically for Meta-safe publishing
+- scheduled drafts are hidden from the visible draft queue but retained for execution
+- immediate successful posts clear the draft queue entry
+
+## 5. Creative Drafts
+
+- draft creation from vault assets
+- draft rename
+- Copy Studio editing
+- caption regeneration
+- manual caption editing
+- draft references can be mounted into Jarvis chat reliably
+
+## 6. Jarvis Chat
+
+- natural language scheduling
+- natural language immediate publish
+- inline approval cards
+- retry support for failed immediate publish attempts
+- deterministic tool-first replies for publish outcomes
+- less filler, more exact platform result reporting
+
+## 7. Approvals
+
+- pending approvals can be created by Jarvis
+- approvals can be handled:
+  - inline in chat
+  - via WhatsApp
+- approval preflight now validates:
+  - media compatibility
+  - live Meta credentials
+  - schedule timing
+- invalid approvals are blocked before they reach live schedule
+
+## 8. WhatsApp
+
+- owner approval routing
+- 24-hour reply window enforcement
+- inbound message window tracking
+- approval card delivery guardrails
+- WhatsApp remains part of the system, but is no longer the main UX surface
+
+## 9. Scheduling
+
+- one-off scheduling
+- relative scheduling phrases
+- active vs history separation
+- failed jobs marked `failed`
+- purge history removes retained history states
+- stale approvals pruned when they already became scheduled or expired
+
+## 10. Publishing
+
+- Facebook image posting
+- Facebook video posting
+- Instagram image posting
+- Instagram reel/video posting
+- platform-specific result reporting
+- partial success reporting
+- dead public asset URL detection before publish
+- Instagram image/video compatibility preflight
+
+## 11. Media Safety / Compatibility
+
+- Instagram-incompatible images are flagged
+- non-safe video audio/video profiles are detected
+- transport preflight checks public media fetchability
+- Meta-safe video normalization on upload
+- one-click repair for older stored videos
+
+## 12. Dashboard
+
+- premium lock screen
+- simplified production-like dashboard
+- operations snapshot
+- live agent status
+- section notification pings
+- no visible demo framing in the main flow
+
+## 13. Live Agent Status
+
+The dashboard now surfaces active roles conceptually:
+- Orchestrator
+- Client Synthesizer
+- Caption Agent
+- Publish Agent
+- Scheduler
+- WhatsApp Lane
+
+These cards are used to make the system easier to read for non-technical viewers.
+
+## 14. Known Gaps
+
+- bilingual English/Arabic brief and caption workflow is not fully implemented yet
+- stable production domain still needed; rotating tunnel URLs are fragile
+- no full client-facing WhatsApp inbox product yet
+- no deep autonomous troubleshooting engine yet
+
+## 15. Product Principle
+
+Jarvis should report what actually happened.
+
+That means:
+- no fake everything worked language
+- no vague troubleshooting promises unless there is a real recovery path
+- per-platform outcomes must be surfaced honestly
+
+==== agent_spec.md
+# Jarvis System Spec
+
+This is the current high-level system spec, not the original early brainstorm.
+
+## Goal
+
+Jarvis is a multi-client agency operating system that helps a marketing agency:
+- onboard clients
+- store brand memory
+- upload and organize creative assets
+- create and manage drafts
+- generate captions
+- schedule or immediately publish to Facebook and Instagram
+- route approvals through desktop chat or WhatsApp
+
+The main product is not many disconnected tools. The main product is one operator lane centered on Jarvis chat.
+
+## Core Product Rules
+
+1. Jarvis chat is the front door.
+2. WhatsApp is the mobile control lane, not a second dashboard.
+3. Schedule is an oversight surface, not a mandatory workflow detour.
+4. Approvals must be validated before they become executable jobs.
+5. Jarvis must report real platform outcomes, not AI filler.
+
+## Main Agents / Roles
+
+### Lead Orchestrator
+- interprets user intent
+- distinguishes schedule vs immediate publish
+- mounts client and draft context
+- creates approval requests
+- returns structured action metadata to the frontend
+
+### Client Synthesizer
+- turns raw intake text into client profile structure
+- extracts brand voice, services, audience, SEO cues, and operating defaults
+- currently strongest for Arabic-first content brands
+
+### Caption Agent
+- generates brand-aware captions from client context and draft/topic context
+- currently Arabic-first
+- should become bilingual next
+
+### Publish Agent
+- validates media and account readiness
+- performs per-platform delivery
+- returns honest platform breakdown
+
+### Scheduler
+- runs future jobs
+- tracks active and history states
+- marks failed jobs cleanly
+
+### WhatsApp Lane
+- sends owner approvals and controlled mobile actions
+- respects the 24-hour reply window
+
+## Current Workflow
+
+1. Client is created or synthesized.
+2. Profile + credentials are saved.
+3. Assets are uploaded into that clients vault.
+4. Draft is created from the selected asset(s).
+5. User asks Jarvis to schedule or post.
+6. If approval is needed, Jarvis returns an inline approval card.
+7. User approves in chat or routes to WhatsApp.
+8. Approval is preflight-validated.
+9. Job is scheduled or published.
+10. Jarvis reports exact outcome.
+
+## Storage Model
+
+### Active backend
+- Supabase
+
+### Fallback
+- JSON remains available for recovery / migration use
+
+### Important data areas
+- client profiles
+- brand profiles
+- schedule jobs
+- approval records
+- publish runs
+- asset vault storage
+
+## What Has Been Simplified
+
+### Removed as primary workflow
+- visible Approval Center as a required step
+
+### Kept
+- underlying approval model
+- schedule oversight
+- WhatsApp control path
+
+This is intentional. The premium version of the product should reduce operator hopping, not increase it.
+
+## Current Risks
+
+1. Rotating public tunnel URL can break Meta media fetches.
+2. Bilingual brief/caption support is still incomplete.
+3. The frontend is a large single-file dashboard and requires disciplined sectioning when edited.
+
+## Next Major Capability
+
+### Bilingual support
+Needed behavior:
+- synthesize English briefs correctly
+- still allow Arabic captions when the agency wants Arabic output
+- support English-only, Arabic-only, or bilingual caption output per client / per draft
+
+This is the next meaningful product upgrade before broader deployment.
+
+==== caption_agent_spec.md
+# Caption Agent Spec
+
+This file documents the current caption agent and the next required extension.
+
+## Current Goal
+
+Generate brand-aware social captions for saved client drafts and content topics.
+
+Today the agent is strongest when the target output is Arabic. It uses:
+- client brand profile
+- services
+- target audience
+- SEO keywords
+- hashtag bank
+- brand voice examples
+
+## Current Inputs
+
+- `client_id`
+- draft/topic context
+- media type
+- stored brand profile
+
+## Current Outputs
+
+- caption text
+- hashtags
+- structured payload used by the dashboard / pipeline
+
+## Current Reality
+
+The current implementation is Arabic-first.
+
+That was correct for the earliest customer brief, but it is now a limitation because the system needs to support:
+- English-language clients
+- Arabic-language clients
+- English briefs that still require Arabic captions
+
+## Required Upgrade
+
+The next version of the caption agent must support separated language concerns:
+
+### 1. Brief language
+What language the agency used when writing the intake / client brief.
+
+### 2. Brand primary language
+What language the client primarily communicates in.
+
+### 3. Caption output language
+What language Jarvis should generate for publishing.
+
+These are not always the same.
+
+Example:
+- brief language: English
+- brand primary language: Arabic
+- caption output language: Arabic
+
+## Proposed Minimal Data Shape
+
+Add a language profile to the stored client profile:
+
+```json
+{
+  "language_profile": {
+    "brief_language": "english",
+    "primary_language": "arabic",
+    "caption_output_language": "arabic",
+    "arabic_mode": "gulf"
+  }
+}
+```
+
+## Required Behavior
+
+### Arabic output
+- natural Gulf Arabic when configured
+- not robotic MSA unless explicitly requested
+
+### English output
+- clean premium agency English
+- not literal Arabic-to-English translation
+
+### Bilingual output
+- optional mode for mixed campaigns
+- must be explicit, not accidental
+
+## Required UI Support
+
+The dashboard should expose:
+- primary language
+- caption output language
+- optional per-draft override
+
+## What Not To Do
+
+- do not guess Arabic output just because the system was originally Arabic-first
+- do not assume the brief language is the publish language
+- do not hide the chosen output language from the operator
+
+## Current Priority
+
+This bilingual extension is one of the highest-value remaining product upgrades before broader demos and deployment.
+
+==== JARVIS_OX.md
+# Jarvis Master Spec
+
+## Purpose
+
+Jarvis is a premium agency operating system for content operations.
+
+It is designed to let an agency operator manage multiple clients from one controlled lane, with:
+- brand memory
+- vault assets
+- creative drafts
+- caption generation
+- approvals
+- scheduling
+- publishing
+
+## Current UX Philosophy
+
+The product should feel like one system.
+
+That means:
+- Jarvis chat is primary
+- Schedule is secondary oversight
+- WhatsApp is mobile control
+- supporting pages should not compete with the main workflow
+
+## Core Runtime
+
+### `webhook_server.py`
+- FastAPI API layer
+- auth
+- client synthesis
+- dashboard summary
+- vault endpoints
+- approval actions
+- WhatsApp webhooks
+
+### `orchestrator_agent.py`
+- natural language routing
+- draft/client mounting
+- schedule vs immediate publish logic
+- structured action return
+
+### `caption_agent.py`
+- caption generation from brand profile
+- currently strongest in Arabic mode
+
+### `publish_agent.py`
+- media validation
+- platform-specific publish
+- per-platform result reporting
+
+### `scheduler.py`
+- future execution daemon
+- hot loads schedule store
+
+## Data Model
+
+### Backend
+- Supabase is the intended active backend
+
+### Fallback
+- JSON exists for recovery / migration use
+
+### Major stores
+- client store
+- draft store
+- approval store
+- schedule store
+- publish run store
+- asset store
+
+## Current Product Boundary
+
+### In
+- content operations
+- approvals
+- scheduling
+- direct publishing
+- mobile control lane
+
+### Not fully in yet
+- bilingual full workflow
+- deep client-facing WhatsApp inbox
+- stable hosted public delivery
+
+## Product Quality Rules
+
+1. Do not silently accept work that will fail later.
+2. Validate media and credentials before approval enters the live schedule.
+3. Report real platform outcomes, not generic AI softening.
+4. Keep workflow surfaces minimal and coherent.
+
+## Strategic Direction
+
+Jarvis should become a reusable vertical system:
+- Jarvis Marketing
+- Jarvis Leads
+- Jarvis Real Estate
+
+The lock screen, dashboard shell, and operating pattern can stay structurally similar across verticals, while:
+- palette
+- copy
+- agent emphasis
+- workflow details
+change per domain.
+
+==== Client Brief.md
+# Client Brief
+
+This file is the original market-discovery source material, not the current product contract.
+
+## Why it still matters
+
+This conversation is the root reason Jarvis was shaped the way it is:
+- Arabic captions mattered
+- SEO mattered
+- scheduling and posting mattered
+- follow-up pain existed
+- multiple clients mattered
+
+## What the repo actually built from this
+
+### Built now
+- client onboarding
+- brand synthesis
+- Arabic-first caption generation
+- scheduling
+- direct publishing
+- WhatsApp owner approval lane
+
+### Not fully built yet
+- full client-facing follow-up automation
+- ads planning / audience targeting
+- Google Ads execution
+- bilingual English/Arabic system
+
+## Raw Source Conversation
+
+Cobversation between me and another AI:
+
+OKAY now wait before we do anything, 
+
+
+here is a refresher to what the conversation between me and my client went:
+here is the full conversation i had with my client on text:
+Me:  i actually wanted to reach out to you specifically because im building an AAA, i build systems that handle the repetitive daily workflows agencies deal with automatically 24/7, no human needed think of it like your own employee in the company that follows your strict workflows and gives you briefings once finished so yeah, i was going to ask you a few questions about pain points you guys face to help me understand the market better
+Client: Okay give me more details about it See usually we deals with client and most of em are arabs and we have groups with the clients for follow up and thats the most headache
+Me: You replied to Omer Mohammed Not even close, a chatbot just answers questions, what i build actually does things on its OWN. its not a chatbot, its an Agent that executes, it has access to your browser, your files, your email your tools, runs on a schedule and remembers everything across sessions, once it has the objectives built it figures out the steps and completes them autonomously without any human in the loop The intelligence will come from Either Claudes antrophic opus 4.6 or gpt5.3 So literally your own employee
+Client: Ohhh thats a good model bow i get it its like an employee that would be good like for social media postings Like we could use it to schedule the post and create caption Or give suggestions for marketing plan if that could do it then yeah its a very good model Im interested
+Me: Yes it can post and schedule, but think bigger. it can monitor every DM and comment your clients get and respond automatically in their brand voice, it can see a lead come in, follow up with them, qualify them, book a meeting and send YOU a summary, all at 3am while youre asleep making this exactly autonomous
+Client: Perfect thats a very good model See, our main thing is that schedule post genertae captuon and handle client follow ups
+Me: i built my own agents that are tailored towards my own personalized tasks and workflows, which is why understanding your pain point is the priority, for example if what you said about scheduling post and caption generation including client follow ups is your finalized plan. i can get to working/building heres what itll look like: One system handles all three, it generates the captions in the clients brand voice, schedules and posts automatically across platforms (using cron and heartbeat) and simultaneously manages all client follow ups, so DMs, leads, responses without anyone on your team touching it, thats your entire operations for those 2 services running on autopilot How many clients are you planning to run in the new agency?
+Client: So far i have 3 client But yeah the main pain is the post and idea and scheduling in meta and the audience targeting in ads and even running in google ads Amd specially in arabic the captions needs to be And SEO friendly
+Me: ARABIC SEO, captions, content ideas, scheduling All automated. arabic part is actually an advantage because most tools handle it badly this would be built specifically for how you work, honestly this is enough for me to start mapping out a system for you, all i need from you is to tell me exactly when are you planning to make your next new agency and then give me a call as soon as that happens
+Client: Oh yeah 100% we just applied for a new licence so im waiting for it
+Me: fuck yeah, perfect then call me soon as its all figured
+Client: Inshallah thanks for letting me know about this also it will eliminate all that hassle for me
+And that's it. update timeline: this conversation was from about a week ago, i might have promised him more than i could have since i didnt know better a week ago with just my openclaw thinking but im hoping i can reach a lvel where i can make something that's even close to getting him satisfied.

@@ -20,6 +20,14 @@ MONTH_INDEX["sept"] = 9
 DAY_ALIASES = {
     "today": "today",
     "tdy": "today",
+    "tonight": "tonight",
+    "tonite": "tonight",
+    "later tonight": "tonight",
+    "this evening": "tonight",
+    "evening": "tonight",
+    "later this evening": "tonight",
+    "this afternoon": "today",
+    "this morning": "today",
     "tomorrow": "tomorrow",
     "tommorow": "tomorrow",
     "tmrw": "tomorrow",
@@ -54,8 +62,10 @@ def parse_iso_date(value: str | None) -> date | None:
 
 
 def parse_time_string(time_str: str) -> datetime.time:
-    cleaned = time_str.strip().upper()
-    for fmt in ("%I:%M %p", "%H:%M"):
+    cleaned = str(time_str or "").strip().upper()
+    cleaned = re.sub(r"(?<=\d)(AM|PM)\b", r" \1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    for fmt in ("%I:%M %p", "%I %p", "%H:%M", "%H"):
         try:
             return datetime.strptime(cleaned, fmt).time()
         except ValueError:
@@ -98,6 +108,8 @@ def normalize_weekday_token(token: str, base_date: date | None = None) -> str:
     if not lowered:
         return ""
     if lowered == "today":
+        return base.strftime("%A")
+    if lowered == "tonight":
         return base.strftime("%A")
     if lowered == "tomorrow":
         return (base + timedelta(days=1)).strftime("%A")
@@ -177,6 +189,8 @@ def resolve_date_phrase(text: str | None, base_date: date | None = None) -> date
     cleaned = re.sub(r"\s+", " ", raw.replace(",", " ")).strip().lower()
     cleaned = DAY_ALIASES.get(cleaned, cleaned)
     if cleaned == "today":
+        return base
+    if cleaned == "tonight":
         return base
     if cleaned == "tomorrow":
         return base + timedelta(days=1)

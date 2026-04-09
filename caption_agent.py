@@ -1,101 +1,70 @@
-import os
 import json
+import os
+import re
+import time
+from typing import Any
+
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
-from agents import Agent, Runner, function_tool, set_default_openai_client, set_tracing_disabled
+from openai import OpenAI
+
+from client_store import get_client_store
+from queue_store import normalize_hashtag_list
 
 load_dotenv()
 
-# Setup OpenRouter client (just like sdk_test.py)
-custom_client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY")
-)
+CAPTION_MODEL = os.getenv("CAPTION_MODEL", "qwen/qwen3.6-plus-preview:free").strip() or "qwen/qwen3.6-plus-preview:free"
+CAPTION_FALLBACK_MODEL = os.getenv("CAPTION_FALLBACK_MODEL", "").strip()
+CAPTION_TIMEOUT_SECONDS = float(os.getenv("CAPTION_TIMEOUT_SECONDS", "35"))
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+HASHTAG_RE = re.compile(r"#[^\s#]+", re.UNICODE)
+AI_SMELL_PHRASES = [
+    "elevate your",
+    "elevate",
+    "discover the",
+    "step into",
+    "unlock the",
+    "unlock your",
+    "transform your",
+    "take your",
+    "next level",
+    "whether you're",
+    "ready to",
+    "not just",
+    "journey",
+]
 
-set_default_openai_client(custom_client)
-set_tracing_disabled(True)
 
-@function_tool
-def load_brand_profile(client_name: str) -> str:
-    """
-    Reads a client's brand voice JSON profile.
-    Returns the tone, style, dialect notes, brand voice examples, banned words, SEO keywords, hashtag bank, services, identity, and copy rules.
-    If the profile does not exist, returns an error message.
-    """
-    # ensure it looks for the file in the correct directory relative to execution
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(base_dir, "brands", f"{client_name}.json")
-    
-    if not os.path.exists(file_path):
-        return json.dumps({
+def _build_client() -> tuple[OpenAI, str]:
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    if openrouter_key:
+        return (
+            OpenAI(
+                base_url=OPENROUTER_BASE_URL,
+                api_key=openrouter_key,
+                timeout=CAPTION_TIMEOUT_SECONDS,
+                max_retries=0,
+            ),
+            "openrouter",
+        )
+    if openai_key:
+        return OpenAI(api_key=openai_key, timeout=CAPTION_TIMEOUT_SECONDS, max_retries=0), "openai"
+    raise RuntimeError("Missing OPENROUTER_API_KEY or OPENAI_API_KEY in .env")
+
+
+def _load_brand_profile_payload(client_name: str) -> dict[str, Any]:
+    store = get_client_store()
+    data = store.get_brand_profile(client_name)
+    if not data:
+        return {
             "status": "error",
-            "message": f"No brand profile for {client_name}. Create one before running."
-        })
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return json.dumps({
-                "status": "success",
-                "brand_data": data
-            }, ensure_ascii=False)
-    except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "message": f"Failed to load profile for {client_name}: {str(e)}"
-        })
-
-caption_agent = Agent(
-    name="Caption Generator",
-    model="openai/gpt-4o-mini",
-    instructions="""You are a social media content specialist for Arab-market agencies.
-    
-Your specific goal is to generate Gulf Arabic (خليجي), SEO-friendly social media captions in a client's brand voice for Facebook and Instagram.
-
-Rules:
-1. CRITICAL: You must call load_brand_profile with the client_name EXACTLY ONCE to understand their brand voice. Use the returned identity, target audience, services, dos_and_donts, tone, style, dialect notes, and brand_voice_examples to shape the caption. Brand voice examples are the strongest signal for rhythm and wording. Once you receive the profile data, you MUST immediately output the final JSON block and STOP. Do NOT call the tool again.
-2. If the requested topic is completely unrelated to the brand's listed services (e.g. asking a real estate brand to post about winter coats), or if it is a sensitive subject, output status as "held_for_review" and explain why in the caption field.
-3. If the brand profile is missing or errors out, STOP immediately. Output the error message in the caption field and explicitly set the status to "error". Do not invent a brand voice.
-4. Generate the caption strictly in Gulf Arabic (not MSA, not Egyptian). Use the words suggested in the dialect notes.
-5. Caption length must strictly fall within the limits specified in the brand profile (usually 150-300 characters).
-6. Include 3-5 relevant Arabic hashtags from the brand's hashtag bank or new ones if relevant.
-7. Naturally embed at least 1 SEO keyword from the brand profile into the text, but never force it awkwardly.
-7. Do NOT use any banned words listed in the profile.
-8. Use the provided topic as the campaign angle, and adapt the opening hook to the media type if it is present in the prompt. If the topic is vague, stay close to the saved services and voice examples instead of inventing a random campaign. Reels/video should feel more immediate and momentum-driven, while image posts can be slightly more descriptive.
-9. Platform-specific formatting rules:
-   - Instagram: Max 2,200 characters total but ONLY the first 125 characters 
-     show before the "more" button — put the hook and the most important line 
-     there. Use 3-5 highly relevant hashtags placed directly in the caption 
-     (not the first comment — Instagram's 2026 algorithm indexes captions more 
-     reliably for search). Mix hashtag sizes: 1-2 broad (1M+ posts), 2-3 niche 
-     (10K-500K posts). Never repeat the same hashtag set across posts. Keywords 
-     in the caption body now matter more than hashtag volume for reach.
-
-   - Facebook: Max 63,206 characters but posts between 40-80 characters get 
-     66% higher engagement — keep it short and punchy. Use 2-3 hashtags maximum, 
-     placed at the end of the post. Hashtags have far less algorithmic weight on 
-     Facebook than Instagram — engagement signals (comments, shares, saves) matter 
-     far more. Never use engagement bait phrases ("like if you agree", "tag a 
-     friend") — Facebook's algorithm penalizes this. Reels outperform all other 
-     formats in 2026 — if generating video captions, keep them under 125 characters 
-     with the hook in the first line.
-     Note: For Arabic-language posts, prioritize relevance over hashtag volume 
-     size — the Arabic hashtag ecosystem is smaller. Never switch to English 
-     hashtags to meet volume thresholds.
-10. If the requested topic is completely unrelated to the brand's listed services (e.g. asking a real estate brand to post about winter coats), or if it is a sensitive subject, output status as "held_for_review" and explain why in the caption field.
-11. Output your final response as a pure JSON object (do not wrap in markdown code blocks) containing ONLY the following fields:
-   {
-       "caption": "The generated Arabic text (or error message)",
-       "hashtags": ["#tag1", "#tag2"],
-       "seo_keyword_used": "The keyword you embedded",
-       "status": "success" (or "error", or "held_for_review")
-   }
-""",
-    tools=[load_brand_profile]
-)
+            "message": f"No brand profile for {client_name}. Create one before running.",
+        }
+    return {"status": "success", "brand_data": data}
 
 
-def extract_caption_json(output: str) -> dict:
+def _extract_caption_json(output: str) -> dict[str, Any]:
     clean_output = (output or "").strip()
     if clean_output.startswith("```json"):
         clean_output = clean_output[7:]
@@ -103,17 +72,200 @@ def extract_caption_json(output: str) -> dict:
         clean_output = clean_output[3:]
     if clean_output.endswith("```"):
         clean_output = clean_output[:-3]
-    return json.loads(clean_output.strip())
+    clean_output = clean_output.strip()
+
+    try:
+        return json.loads(clean_output)
+    except Exception:
+        pass
+
+    start = clean_output.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in caption response")
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(clean_output)):
+        ch = clean_output[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(clean_output[start:index + 1])
+    raise ValueError("Unterminated JSON object in caption response")
+
+
+def normalize_caption_payload(output: dict) -> dict:
+    payload = dict(output or {})
+    caption = str(payload.get("caption") or "").strip()
+
+    raw_hashtags = payload.get("hashtags", [])
+    if not isinstance(raw_hashtags, list):
+        raw_hashtags = []
+
+    extracted = HASHTAG_RE.findall(caption)
+    merged = normalize_hashtag_list(raw_hashtags + extracted)
+
+    if extracted:
+        caption = HASHTAG_RE.sub("", caption)
+        caption = re.sub(r"[ \t]+", " ", caption)
+        caption = re.sub(r"\n\s*\n\s*\n+", "\n\n", caption)
+        caption = "\n".join(line.strip() for line in caption.splitlines())
+        caption = caption.strip(" \n-")
+
+    payload["caption"] = caption.strip()
+    payload["hashtags"] = merged
+    payload["seo_keyword_used"] = str(payload.get("seo_keyword_used") or "").strip()
+    payload["status"] = str(payload.get("status") or "success").strip() or "success"
+    return payload
+
+
+def _compact_caption_profile(brand_data: dict[str, Any]) -> dict[str, Any]:
+    data = dict(brand_data or {})
+    profile = data.get("caption_profile")
+    if isinstance(profile, dict) and profile:
+        return profile
+
+    voice = data.get("brand_voice") or {}
+    tone = str(voice.get("tone") or "").strip()
+    style = str(voice.get("style") or "").strip()
+    dialect = str(voice.get("dialect") or "").strip()
+    examples = data.get("brand_voice_examples") or []
+    if not isinstance(examples, list):
+        examples = []
+    rules = [item for item in [
+        f"Tone: {tone}" if tone else "",
+        f"Style: {style}" if style else "",
+        f"Dialect: {dialect}" if dialect else "",
+        *(str(item).strip() for item in examples[:2]),
+    ] if item]
+    services = data.get("services") or []
+    if not isinstance(services, list):
+        services = []
+    return {
+        "business_name": str(data.get("business_name") or data.get("client_name") or "").strip(),
+        "industry": str(data.get("industry") or "general").strip(),
+        "audience_summary": str(data.get("target_audience") or "").strip(),
+        "offer_summary": ", ".join(str(item).strip() for item in services[:6] if str(item).strip()),
+        "voice_rules": rules,
+        "do_avoid_rules": [str(item).strip() for item in (data.get("dos_and_donts") or [])[:8] if str(item).strip()],
+        "seo_keywords": [str(item).strip() for item in (data.get("seo_keywords") or [])[:8] if str(item).strip()],
+        "language_profile": data.get("language_profile") or {},
+        "cta_style": str((data.get("caption_defaults") or {}).get("cta_style") or "Clear, premium, direct, and conversion-aware.").strip(),
+    }
+
+
+def _build_caption_messages(client_name: str, topic: str, media_type: str, profile_payload: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": """You are a sharp social media copywriter for premium agencies.
+
+Return pure JSON only with exactly these fields:
+{
+  "caption": "Main caption body without hashtags",
+  "hashtags": ["#tag1", "#tag2"],
+  "seo_keyword_used": "keyword used in the caption",
+  "status": "success"
+}
+
+Rules:
+1. Use the supplied brand profile only. Do not invent brand identity.
+2. Follow language_profile.caption_output_language exactly.
+3. If caption_output_language is Arabic and arabic_mode is gulf, use Gulf Arabic.
+4. If caption_output_language is English, write clean premium English, not translated Arabic.
+5. Keep hashtags out of the caption body.
+6. Return 3-5 relevant hashtags matching the output language.
+7. Embed at least one real SEO keyword naturally in the caption body.
+8. Never use banned words.
+9. The caption must feel human, current, and publishable. Avoid generic AI-marketing cadence.
+10. Avoid these stale phrases and close variants entirely: elevate your, discover the, step into, unlock the, transform your, next level, ready to, whether you're, not just, journey.
+11. Prefer concrete details over abstract hype. Name the actual product, offer, mood, texture, result, location, or occasion when possible.
+12. Keep the rhythm natural. Use shorter sentences, fewer adjectives, and one clear CTA at most.
+13. Do not sound like a motivational coach, consultant, or generic brand manifesto unless the brand profile explicitly calls for that.
+14. If the brand voice includes emojis, use them sparingly and deliberately. If not, use none.
+15. For English output, default to crisp, modern, social-first phrasing. For Arabic output, sound native and current, not formal translation-speak.
+9. If the topic is unrelated to the brand or unsafe, return:
+{
+  "caption": "Reason the request should be held.",
+  "hashtags": [],
+  "seo_keyword_used": "",
+  "status": "held_for_review"
+}
+10. Keep the caption tight and publish-ready. Usually 35-90 words is enough unless the brand profile clearly requires more.
+11. The output must read like something a strong human social media manager would actually publish today, not a default LLM sample.""",
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Client: {client_name}\n"
+                f"Topic: {topic}\n"
+                f"Media Type: {media_type}\n"
+                f"Platform: Both (Facebook and Instagram)\n\n"
+                f"Do not use any of these tired phrases unless the profile explicitly demands them: {', '.join(AI_SMELL_PHRASES)}.\n"
+                f"Caption Profile JSON:\n{json.dumps(profile_payload, ensure_ascii=False)}"
+            ),
+        },
+    ]
 
 
 def generate_caption_payload(client_name: str, topic: str, media_type: str = "image_post") -> dict:
-    request_prompt = (
-        f"Client: {client_name}\n"
-        f"Topic: {topic}\n"
-        f"Media Type: {media_type}\n"
-        f"Platform: Both (Facebook and Instagram)"
-    )
-    result = Runner.run_sync(caption_agent, request_prompt, max_turns=3)
-    data = extract_caption_json(result.final_output)
-    data["client_name"] = client_name
-    return data
+    profile_payload = _load_brand_profile_payload(client_name)
+    if profile_payload.get("status") != "success":
+        return {
+            "caption": str(profile_payload.get("message") or "Brand profile missing."),
+            "hashtags": [],
+            "seo_keyword_used": "",
+            "status": "error",
+            "client_name": client_name,
+        }
+
+    client, provider = _build_client()
+    compact_profile = _compact_caption_profile(profile_payload["brand_data"])
+    model_candidates = []
+    if CAPTION_MODEL:
+        model_candidates.append(CAPTION_MODEL)
+    if CAPTION_FALLBACK_MODEL and CAPTION_FALLBACK_MODEL not in model_candidates:
+        model_candidates.append(CAPTION_FALLBACK_MODEL)
+    elif provider == "openrouter" and CAPTION_MODEL != "qwen/qwen3.6-plus-preview:free":
+        model_candidates.append("qwen/qwen3.6-plus-preview:free")
+
+    last_error = None
+    for attempt, candidate_model in enumerate(model_candidates):
+        try:
+            response = client.chat.completions.create(
+                model=candidate_model,
+                messages=_build_caption_messages(client_name, topic, media_type, compact_profile),
+                temperature=0.35,
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            content = response.choices[0].message.content or ""
+            data = normalize_caption_payload(_extract_caption_json(content))
+            data["client_name"] = client_name
+            return data
+        except Exception as exc:
+            last_error = exc
+            if attempt < len(model_candidates) - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s...
+            continue
+
+    return {
+        "caption": f"Caption generation failed: {last_error}" if last_error else "Caption generation failed.",
+        "hashtags": [],
+        "seo_keyword_used": "",
+        "status": "error",
+        "client_name": client_name,
+    }

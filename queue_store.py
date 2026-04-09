@@ -9,6 +9,9 @@ SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
 
 GENERIC_DRAFT_NAME_RE = re.compile(r'^(image post|carousel|reel)\s+\d+$', re.IGNORECASE)
+HASHTAG_SPLIT_RE = re.compile(r"[\n,،;|]+")
+HASHTAG_SPACE_RE = re.compile(r"\s+")
+INVALID_HASHTAG_CHARS_RE = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def sanitize_topic_hint(bundle_name: str, topic_hint: str) -> str:
@@ -20,6 +23,46 @@ def sanitize_topic_hint(bundle_name: str, topic_hint: str) -> str:
     if GENERIC_DRAFT_NAME_RE.match(hint):
         return ''
     return hint
+
+
+def normalize_hashtag_token(raw_tag: str) -> str:
+    tag = str(raw_tag or "").strip()
+    if not tag:
+        return ""
+    tag = tag.lstrip("#").strip()
+    if not tag:
+        return ""
+    tag = HASHTAG_SPACE_RE.sub("_", tag)
+    tag = INVALID_HASHTAG_CHARS_RE.sub("", tag)
+    tag = tag.strip("_")
+    if not tag:
+        return ""
+    return f"#{tag}"
+
+
+def normalize_hashtag_list(raw_tags: Any) -> list[str]:
+    candidates: list[str] = []
+    if isinstance(raw_tags, str):
+        candidates = [part for part in HASHTAG_SPLIT_RE.split(raw_tags) if part.strip()]
+    elif isinstance(raw_tags, list):
+        for raw in raw_tags:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            candidates.extend(part for part in HASHTAG_SPLIT_RE.split(text) if part.strip())
+
+    normalized: list[str] = []
+    seen = set()
+    for raw in candidates:
+        tag = normalize_hashtag_token(raw)
+        if not tag:
+            continue
+        key = tag.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(tag)
+    return normalized
 
 
 def detect_media_kind(filename: str) -> str:
@@ -63,10 +106,7 @@ def normalize_bundle_entry(bundle_name: str, payload: Any) -> dict[str, Any]:
         seo_keyword_used = str(payload.get("seo_keyword_used") or "").strip()
         caption_status = str(payload.get("caption_status") or ("ready" if caption_text else "empty")).strip().lower()
         topic_hint = sanitize_topic_hint(bundle_name, payload.get("topic_hint"))
-        hashtags = payload.get("hashtags", [])
-        if not isinstance(hashtags, list):
-            hashtags = []
-        hashtags = [str(tag).strip() for tag in hashtags if str(tag).strip()]
+        hashtags = normalize_hashtag_list(payload.get("hashtags", []))
 
         return {
             "bundle_name": bundle_name,

@@ -1,163 +1,146 @@
-# 🧠 Jarvis Agency OS — Feature Registry
+# Jarvis Feature Registry
 
-> Last updated: March 26, 2026  
-> This file is the single source of truth for every implemented capability.
+This file is the current capability map for Jarvis as of the latest working state of the repo.
 
----
+## 1. Product Flow
 
-## Lead Orchestrator (Chat Interface)
+### Primary flow
+- Jarvis chat is the main command surface
+- inline approval cards handle approve / move time / discard / WhatsApp routing
+- schedule page is for oversight and history
+- vaults and client config support the content workflow
 
-| Feature | Description |
-|---------|-------------|
-| Natural Language Commands | Chat with Jarvis in plain English to schedule, post, analyze, and manage |
-| @Client Mentions | Type `@` to mount a client's CRM vault into context |
-| Smart Loading States | Context-aware loading text (posting, analyzing, searching, scanning) |
-| Triple-Dot Pulse Animation | Premium breathing dots during AI processing |
-| Markdown Renderer | Full support: bold, italic, headers, bullet/numbered lists, code, HR |
-| Dual Response Modes | Conversational replies = clean bubble · Structured data = formatted card |
-| RGB Breathing Input | Conic-gradient animation on input bar while processing |
-| Success Flash | Green border flash on completion |
-| Error Cards | Red-bordered error display with exact failure message |
+### Secondary flow
+- WhatsApp acts as a mobile control lane for:
+  - owner approvals
+  - urgent review
+  - failure alerts
+  - executive summaries
 
----
+## 2. Client Onboarding
 
-## Content Pipeline
+- AI client synthesis from pasted brief or uploaded text file
+- client profile persistence
+- separated brand profile and live credential storage
+- client config editing from dashboard
+- no auto-popup operating brief after save
 
-| Feature | Description |
-|---------|-------------|
-| AI Caption Generation | LLM-powered captions using brand voice profiles (tone, dialect, hashtags) |
-| Gulf Arabic (خليجي) Support | Natural Arabic dialect, not robotic MSA |
-| Single Image Publishing | One image → Facebook + Instagram |
-| Carousel Publishing | Multi-image bundles → Instagram carousel (swipeable) + Facebook album |
-| Platform-Specific Formatting | IG: hook in first 125 chars · FB: short-form |
-| Safety Guardrails | Won't generate off-brand or sensitive content |
+## 3. Brand Memory
 
----
+- stored tone / audience / services / SEO keywords / hashtag bank
+- brand voice examples
+- client-isolated profile loading
+- Jarvis context mounting through `@client`
 
-## Scheduling & Automation
+## 4. Asset Vaults
 
-| Feature | Description |
-|---------|-------------|
-| Cron Scheduler | Time-based scheduling with exact day/hour/minute control |
-| Bundle Queuing | Create named bundles (Bundle 1, 2…) in the image vault |
-| Live Delivery Status | Dashboard shows pending → delivered ✅ for each scheduled job |
-| Hot Reload | Add new schedules without restarting the daemon |
-| Background Daemon | `scheduler.py` runs independently, executes jobs automatically |
-| Duplicate Prevention | Jarvis deduplicates repeated bundle names in a single message |
-| Absolute Date Scheduling | Supports `today`, `tomorrow`, `this Friday`, `next Friday`, and calendar-style one-off scheduling |
-| Active / History Separation | Delivered jobs no longer clutter the active schedule view; they move into retained history |
-| Delivered Retention Window | Delivered jobs are auto-pruned after the retention window instead of growing forever |
+- per-client asset isolation
+- upload multiple files
+- images, carousels, and videos
+- old vault videos can be repaired for Meta
+- new uploaded videos are normalized automatically for Meta-safe publishing
+- scheduled drafts are hidden from the visible draft queue but retained for execution
+- immediate successful posts clear the draft queue entry
 
----
+## 5. Creative Drafts
 
-## Client Management (CRM)
+- draft creation from vault assets
+- draft rename
+- Copy Studio editing
+- caption regeneration
+- manual caption editing
+- draft references can be mounted into Jarvis chat reliably
 
-| Feature | Description |
-|---------|-------------|
-| AI Profile Synthesizer | Paste raw client info → LLM auto-fills brand profile JSON |
-| Brand Voice Profiles | Stored in `brands/` — identity, tone, audience, dos/don'ts |
-| Client Credentials | Stored in `clients/` — Meta tokens, page IDs, IG account IDs |
-| Pre-Flight Token Validator | Validates Meta credentials BEFORE committing any schedule |
+## 6. Jarvis Chat
 
----
+- natural language scheduling
+- natural language immediate publish
+- inline approval cards
+- retry support for failed immediate publish attempts
+- deterministic tool-first replies for publish outcomes
+- less filler, more exact platform result reporting
 
-## Media & Asset Management
+## 7. Approvals
 
-| Feature | Description |
-|---------|-------------|
-| Drag-and-Drop Upload | Drop images directly onto client vault in dashboard |
-| Click-to-Upload | File picker button for browsing local files |
-| Client-Isolated Vaults | Each client's assets stored in `assets/{client_id}/` |
-| Bundle Creator | Select images → name a bundle → ready for scheduling |
-| Asset Queue (queue.json) | Tracks which bundles exist and what images they contain |
+- pending approvals can be created by Jarvis
+- approvals can be handled:
+  - inline in chat
+  - via WhatsApp
+- approval preflight now validates:
+  - media compatibility
+  - live Meta credentials
+  - schedule timing
+- invalid approvals are blocked before they reach live schedule
 
----
+## 8. WhatsApp
 
-## Analytics & Intelligence
+- owner approval routing
+- 24-hour reply window enforcement
+- inbound message window tracking
+- approval card delivery guardrails
+- WhatsApp remains part of the system, but is no longer the main UX surface
 
-| Feature | Description |
-|---------|-------------|
-| MetaInsightsScanner | Live IG/FB data via Graph API: likes, comments, reach, saves |
-| Top Post Detection | Identifies highest-engagement post automatically |
-| Carousel vs Single Comparison | Compares avg engagement between post formats with multiplier |
-| Best Posting Day Analysis | Identifies which weekday gets highest avg engagement |
-| Day-by-Day Breakdown | Per-day engagement averages and post counts |
-| Total Reach Aggregation | Summed reach across all analyzed posts |
-| DuckDuckGo Web Search | Search-grounded strategy — real web results, not LLM guessing |
+## 9. Scheduling
 
----
+- one-off scheduling
+- relative scheduling phrases
+- active vs history separation
+- failed jobs marked `failed`
+- purge history removes retained history states
+- stale approvals pruned when they already became scheduled or expired
 
-## Notifications
+## 10. Publishing
 
-| Feature | Description |
-|---------|-------------|
-| WhatsApp Executive Briefing | Auto-notification after every publish with post details |
-| Carousel Detection | Briefing notes whether the post was single or carousel |
-| Post ID Links | Direct links to live posts in briefing messages |
-| Interactive Approval Cards | Owner receives branded WhatsApp approval cards with Approve / Refine / Move Time actions |
-| Reschedule Flow | Move Time opens a WhatsApp reschedule loop and re-issues the approval card with the new release window |
+- Facebook image posting
+- Facebook video posting
+- Instagram image posting
+- Instagram reel/video posting
+- platform-specific result reporting
+- partial success reporting
+- dead public asset URL detection before publish
+- Instagram image/video compatibility preflight
 
----
+## 11. Media Safety / Compatibility
 
-## Architecture
+- Instagram-incompatible images are flagged
+- non-safe video audio/video profiles are detected
+- transport preflight checks public media fetchability
+- Meta-safe video normalization on upload
+- one-click repair for older stored videos
 
-| Feature | Description |
-|---------|-------------|
-| FastAPI Backend | `webhook_server.py` — REST API for all dashboard operations |
-| Static Asset Server | `/assets/` route serves images for Meta to download |
-| Cloudflare Tunnel | Public URL for Meta's servers to reach local assets |
-| OpenRouter Integration | Multi-model LLM access (GPT-4o-mini, Mistral-Nemo, etc.) |
-| Modular Agent Design | Separate agents: Orchestrator, Caption, Publish, WhatsApp |
-| Pipeline Subprocess | Each post runs as isolated subprocess for fault tolerance |
-| Honesty Rule | System prompt forces Jarvis to relay exact errors, never fake success |
+## 12. Dashboard
 
----
+- premium lock screen
+- simplified production-like dashboard
+- operations snapshot
+- live agent status
+- section notification pings
+- no visible �demo� framing in the main flow
 
-## Dashboard Pages
+## 13. Live Agent Status
 
-| Page | What It Does |
-|------|-------------|
-| Lead Orchestrator | Chat with Jarvis — the main command center |
-| Dashboard | System overview and status |
-| Architecture | Visual system topology |
-| Asset Vaults | Upload/manage images per client |
-| Client Config | View/edit client profiles and credentials |
-| + New Client | AI-synthesized client onboarding |
-| Cron Schedule | View scheduled jobs and delivery status |
-| Audit Logs | System event history |
+The dashboard now surfaces active roles conceptually:
+- Orchestrator
+- Client Synthesizer
+- Caption Agent
+- Publish Agent
+- Scheduler
+- WhatsApp Lane
 
----
+These cards are used to make the system easier to read for non-technical viewers.
 
-## 📱 WhatsApp Integration Architecture
+## 14. Known Gaps
 
-The Agency OS features a bifurcated WhatsApp routing system to ensure client satisfaction while keeping the agency owner completely in the loop.
+- bilingual English/Arabic brief and caption workflow is not fully implemented yet
+- stable production domain still needed; rotating tunnel URLs are fragile
+- no full client-facing WhatsApp inbox product yet
+- no deep autonomous troubleshooting engine yet
 
-### 🏢 WhatsApp Agency Features (Your Number / OWNER_PHONE)
-Your phone number is securely stored in the `.env` root file under the `OWNER_PHONE` variable. The system will ONLY send the following system-level alerts to this number:
-- **Executive Post Briefings:** Every time the automated pipeline successfully publishes a scheduled bundle, it fires a WhatsApp message to you containing the post's caption preview, the platforms it was published on, the media format, timestamp, and live URLs to the posts.
-- **Escalation Alerts (Triage Firewall):** If a client texts the bot and is detected as angry or complaining by the Triage AI, the bot will immediately pause auto-replying and ping you with an emergency escalation alert containing the client's name and raw message, allowing you or your human account managers to step in.
+## 15. Product Principle
 
-### 🤝 WhatsApp Client Features (Client Config Number)
-The client's phone number is saved during onboarding and stored in their `Config` profile. 
-- **AI Account Manager:** If the client explicitly texts the bot's WhatsApp number, the LLM will securely load their unique Brand Profile, read their tone/rules, and naturally reply to their questions in Khaleeji Gulf Arabic.
-- **Support Autonomy:** The AI can assure them that their posts are scheduled and handle basic CRM communication, essentially acting as an employee of your agency.
+Jarvis should report what actually happened.
 
----
-
-## 🛑 TESTS BEFORE PRODUCTION (The Chaos Matrix)
-
-| Test Name | Description | Status |
-|-----------|-------------|--------|
-| **1. The Bad Token Trap** | Schedule with invalid Meta Token to test preemptive failure | ✅ **Completed** |
-| **2. The Ghost Bundle** | Ask to schedule a bundle that doesn't exist to test LLM refusal | ✅ **Completed** |
-| **3. The Collision Test** | Schedule multiple bundles for the exact same minute to test parallel pipeline isolation | ✅ **Completed** |
-| **4. The Sabotaged Vault** | Delete an image out of an active scheduled bundle to test runtime missing asset handling | ✅ **Completed** |
-| **5. The WhatsApp Outage** | Process a post while WhatsApp API keys are broken to test graceful platform degradation | ⏳ Pending Fix |
-| **6. Approval Happy Path** | Approve a WhatsApp draft, confirm it enters the schedule, receives a job ID, posts, and sends the executive briefing | ✅ **PASS** |
-| **7. Past-Time Rejection** | Ask Jarvis to schedule `today` at a time that has already passed | ✅ **PASS** |
-| **8. Duplicate Active Schedule Prevention** | Attempt the same active schedule twice and confirm the second is blocked cleanly | ✅ **PASS** |
-| **9. Immediate Publish Path** | Trigger `post now` and confirm immediate publishing still succeeds without the scheduler | ✅ **PASS** |
-| **10. Delivery Integrity** | Confirm a scheduled job is marked delivered after publish and does not remain executable | ✅ **PASS** |
-| **11. Move Time Owner UX** | Tap `Move Time`, reply with a new weekday/time naturally, and confirm the approval card is refreshed cleanly | 🔄 **Retest After Session Binding Patch** |
-| **12. Absolute Date Scheduling** | Schedule with phrases like `tomorrow`, `this Friday`, and `next Friday` and confirm Jarvis resolves a real release date | ✅ **PASS** |
-| **13. Schedule Hygiene** | Confirm active jobs remain clean while delivered jobs are separated into retained history | ✅ **PASS** |
+That means:
+- no fake �everything worked� language
+- no vague troubleshooting promises unless there is a real recovery path
+- per-platform outcomes must be surfaced honestly

@@ -12,4 +12,13 @@ pending_approvals.json
 schedule.json
 reschedule_sessions.json
 whatsapp_audit.log
+pipeline_stream.log
+scheduler_daemon.log
+scheduler_daemon.log.*
 *.Zone.Identifier
+*.backup-*.html
+publish_runs.json
+agency_config.json
+phone_map.json
+whatsapp_contact_windows.json
+*.lock

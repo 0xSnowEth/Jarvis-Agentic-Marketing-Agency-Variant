@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis scheduler daemon
+After=network-online.target jarvis-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/snowaflic/agents
+EnvironmentFile=/home/snowaflic/agents/.env
+ExecStart=/home/snowaflic/agents/venv/bin/python3 /home/snowaflic/agents/scheduler.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
