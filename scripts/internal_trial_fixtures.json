@@ -1,0 +1,258 @@
+{
+  "clients": [
+    {
+      "client_id": "Northline Dental",
+      "quick_intake": {
+        "brand_name": "Northline Dental",
+        "business_type": "cosmetic and family dental clinic",
+        "what_they_sell": "Invisalign consults, whitening sessions, smile makeovers, and routine dental care",
+        "target_audience": "young professionals, engaged couples, and image-conscious adults in Kuwait City",
+        "main_language": "English",
+        "brand_tone": "polished, reassuring, modern",
+        "products_examples": "Invisalign planning, whitening sessions, smile makeovers, routine checkups",
+        "city_market": "Kuwait City, GCC",
+        "offer_focus": "consultation week and whitening upgrades",
+        "words_to_avoid": "cheap, miracle, instant fix, painless guarantee",
+        "inspiration_links": "https://example.com/brand-reference/northline"
+      },
+      "optional_sources": {
+        "website_url": "https://example.com/northline-dental"
+      },
+      "save_overrides": {
+        "meta_access_token": "env:DEMO_META_ACCESS_TOKEN",
+        "facebook_page_id": "env:DEMO_FACEBOOK_PAGE_ID",
+        "instagram_account_id": "env:DEMO_INSTAGRAM_ACCOUNT_ID",
+        "phone_number": ""
+      },
+      "context": {
+        "identity": "Northline Dental is a modern dental studio that makes cosmetic treatment feel calm, premium, and medically grounded.",
+        "positioning": "They want confidence-building copy that feels polished and trusted, never gimmicky or salesy.",
+        "dialect_notes": "English only. Avoid translated Arabic phrasing and avoid sounding like mass-market beauty copy.",
+        "voice_examples": [
+          "A confident smile should feel considered, not rushed. Our consults are built around clarity, comfort, and a treatment plan that fits real life.",
+          "Whitening at Northline is about clean results and calm guidance, not exaggerated promises.",
+          "Every treatment starts with a conversation, so the next step feels informed instead of overwhelming."
+        ],
+        "voice_examples_variant": [
+          "Smile confidence starts with a precise plan and a studio that respects your time.",
+          "Northline speaks with quiet authority: modern care, clear explanations, and outcomes that feel worth investing in.",
+          "We keep the tone refined and direct, with less warmth and more polished confidence."
+        ],
+        "do_rules": [
+          "Lead with clarity and trust.",
+          "Keep the tone polished and calm.",
+          "Make the reader feel informed, not pushed."
+        ],
+        "dont_rules": [
+          "Do not sound flashy or hyped.",
+          "Do not promise instant results.",
+          "Do not use beauty influencer language."
+        ],
+        "seo_keywords": [
+          "Invisalign Kuwait",
+          "teeth whitening Kuwait",
+          "smile makeover clinic",
+          "cosmetic dentist Kuwait",
+          "dental consultation Kuwait"
+        ],
+        "hashtags": [
+          "#NorthlineDental",
+          "#SmileDesign",
+          "#DentalCareKuwait",
+          "#WhiteningConsult",
+          "#InvisalignKuwait"
+        ],
+        "rules_pressure_banned_words": [
+          "cheap",
+          "instant",
+          "miracle",
+          "pain-free"
+        ],
+        "rules_pressure_topic": "Promote the whitening consultation week without using exaggerated medical promises.",
+        "specificity_services": [
+          "Invisalign consults",
+          "whitening sessions",
+          "smile makeover planning"
+        ],
+        "specificity_topic": "Spotlight the Invisalign consult plus whitening bundle without sounding pushy."
+      },
+      "assets": [
+        {
+          "path": "tmp_nasar.jpg",
+          "filename": "northline-lobby.jpg"
+        },
+        {
+          "path": "tmp_gmc.jpg",
+          "filename": "northline-whitening-chair.jpg"
+        },
+        {
+          "path": "inspect_gmc.jpg",
+          "filename": "northline-smile-closeup.jpg"
+        },
+        {
+          "path": "tmp_nasar.jpg",
+          "filename": "northline-consult-desk.jpg"
+        }
+      ],
+      "drafts": [
+        {
+          "bundle_name": "Smile Makeover Story",
+          "files": [
+            "northline-lobby.jpg"
+          ],
+          "topic": "Introduce the smile makeover consult process with calm confidence."
+        },
+        {
+          "bundle_name": "Whitening Week Offer",
+          "files": [
+            "northline-whitening-chair.jpg"
+          ],
+          "topic": "Push the whitening consultation week with a polished but reassuring tone."
+        },
+        {
+          "bundle_name": "Invisalign Confidence Carousel",
+          "files": [
+            "northline-smile-closeup.jpg",
+            "northline-consult-desk.jpg"
+          ],
+          "bundle_type": "image_carousel",
+          "topic": "Explain why Invisalign planning feels more tailored than generic braces marketing."
+        }
+      ],
+      "strategy": {
+        "weekly_goal": "Fill consult slots this week for whitening and Invisalign planning.",
+        "monthly_goal": "Build a 30-day content cadence around consult trust, treatment clarity, and smile confidence.",
+        "campaign_goal": "Drive consultation bookings for whitening and Invisalign this month.",
+        "campaign_context": "Consultation week starts next Monday and evening slots are limited.",
+        "low_context_goal": "Keep the account active without inventing fake offers."
+      }
+    },
+    {
+      "client_id": "Cedar Atelier",
+      "quick_intake": {
+        "brand_name": "Cedar Atelier",
+        "business_type": "luxury gifting and fragrance atelier",
+        "what_they_sell": "curated gift boxes, signature scents, custom event gifting, and premium seasonal sets",
+        "target_audience": "premium female buyers, wedding shoppers, and corporate gifting buyers in Kuwait and the GCC",
+        "main_language": "Both",
+        "brand_tone": "elegant, warm, refined",
+        "products_examples": "Eid gift boxes, custom scent sets, event favors, bridal gifting, corporate gifting bundles",
+        "city_market": "Kuwait, Riyadh, GCC",
+        "offer_focus": "Eid gifting, wedding season, and premium corporate gifting",
+        "words_to_avoid": "cheap, mass-market, fake oud, bargain, lowest price",
+        "inspiration_links": "https://example.com/brand-reference/cedar-atelier"
+      },
+      "optional_sources": {
+        "social_url": "https://instagram.com/example-cedar-atelier"
+      },
+      "save_overrides": {
+        "meta_access_token": "",
+        "facebook_page_id": "",
+        "instagram_account_id": "",
+        "phone_number": ""
+      },
+      "context": {
+        "identity": "Cedar Atelier is a Gulf-facing gifting and fragrance brand that should feel elevated, thoughtful, and intimate rather than loud or transactional.",
+        "positioning": "The copy should sound like premium hospitality: warm, composed, and highly specific about the gifting moment.",
+        "dialect_notes": "Use Gulf-friendly Arabic when Arabic appears. Avoid formal MSA marketing clichés and avoid stiff literal translation.",
+        "voice_examples": [
+          "الهديه الحلوه مو بس شكل.. هي إحساس يوصل من أول لحظه. في Cedar Atelier نهتم بالتفصيل اللي يخلي الهدية تنحفظ.",
+          "When the moment matters, the gift should feel chosen, layered, and beautifully personal.",
+          "من هدايا العيد إلى توزيعات المناسبات، كل ترتيب عندنا مصمم يترك أثر هادئ وأنيق."
+        ],
+        "voice_examples_variant": [
+          "هدية مرتبة بعناية، وروحها واضحة من أول نظرة.",
+          "The tone should feel more editorial and composed, with less softness and more luxury discipline.",
+          "في Cedar Atelier نكتب بثقة هادئة: تفاصيل محسوبة، إحساس راقٍ، ولمسة ما تنسى."
+        ],
+        "do_rules": [
+          "Make the gift moment feel personal.",
+          "Keep the tone warm and composed.",
+          "Mention the occasion or use-case clearly."
+        ],
+        "dont_rules": [
+          "Do not sound like a discount store.",
+          "Do not oversell with generic luxury words.",
+          "Do not use stiff formal Arabic."
+        ],
+        "seo_keywords": [
+          "هدايا فاخرة الكويت",
+          "علب هدايا راقية",
+          "توزيعات مناسبات فاخرة",
+          "luxury gift boxes Kuwait",
+          "custom event gifting GCC"
+        ],
+        "hashtags": [
+          "#CedarAtelier",
+          "#هدايا_فاخرة",
+          "#علب_هدايا",
+          "#توزيعات_مناسبات",
+          "#LuxuryGifting"
+        ],
+        "rules_pressure_banned_words": [
+          "cheap",
+          "mass-market",
+          "discount",
+          "fake oud"
+        ],
+        "rules_pressure_topic": "Promote the Eid gifting edit without sounding like a discount push.",
+        "specificity_services": [
+          "Eid gift boxes",
+          "custom scent sets",
+          "bridal gifting trays"
+        ],
+        "specificity_topic": "Highlight the Eid gift box and custom scent pairing for elegant corporate gifting."
+      },
+      "assets": [
+        {
+          "path": "tmp_gmc.jpg",
+          "filename": "cedar-signature-box.jpg"
+        },
+        {
+          "path": "inspect_gmc.jpg",
+          "filename": "cedar-scent-set.jpg"
+        },
+        {
+          "path": "tmp_nasar.jpg",
+          "filename": "cedar-eid-edit.jpg"
+        },
+        {
+          "path": "inspect_gmc.jpg",
+          "filename": "cedar-event-favor.jpg"
+        }
+      ],
+      "drafts": [
+        {
+          "bundle_name": "Eid Gift Box Feature",
+          "files": [
+            "cedar-signature-box.jpg"
+          ],
+          "topic": "Show the elegance and emotional value behind the Eid gift box."
+        },
+        {
+          "bundle_name": "Custom Scent Story",
+          "files": [
+            "cedar-scent-set.jpg"
+          ],
+          "topic": "Present the custom scent set as a premium, thoughtful gifting choice."
+        },
+        {
+          "bundle_name": "Event Gifting Carousel",
+          "files": [
+            "cedar-eid-edit.jpg",
+            "cedar-event-favor.jpg"
+          ],
+          "bundle_type": "image_carousel",
+          "topic": "Explain how branded event favors can still feel intimate and elevated."
+        }
+      ],
+      "strategy": {
+        "weekly_goal": "Drive enquiry volume for Eid gifting and corporate gifting this week.",
+        "monthly_goal": "Build a 30-day gifting plan across Eid, events, and signature scent storytelling.",
+        "campaign_goal": "Push Eid gifting and premium event orders before the seasonal rush.",
+        "campaign_context": "The brand is preparing an Eid gifting push and wants stronger corporate-order momentum.",
+        "low_context_goal": "Keep the account useful and elegant even if only the core offer is known."
+      }
+    }
+  ]
+}

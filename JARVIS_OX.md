@@ -6,6 +6,7 @@ Jarvis is a premium agency operating system for content operations.
 
 It is designed to let an agency operator manage multiple clients from one controlled lane, with:
 - brand memory
+- strategy planning
 - vault assets
 - creative drafts
 - caption generation
@@ -18,8 +19,9 @@ It is designed to let an agency operator manage multiple clients from one contro
 The product should feel like one system.
 
 That means:
-- Jarvis chat is primary
-- Schedule is secondary oversight
+- Work is primary
+- Jarvis is the persistent assistant, not the homepage
+- Calendar is secondary oversight
 - WhatsApp is mobile control
 - supporting pages should not compete with the main workflow
 
@@ -43,6 +45,11 @@ That means:
 ### `caption_agent.py`
 - caption generation from brand profile
 - currently strongest in Arabic mode
+
+### `strategy_agent.py`
+- focused planning agent
+- builds saved content plans without publishing
+- reads brand profile, recent performance, schedule context, and optional web/trend signals
 
 ### `publish_agent.py`
 - media validation
@@ -97,9 +104,9 @@ Jarvis should become a reusable vertical system:
 - Jarvis Leads
 - Jarvis Real Estate
 
-The lock screen, dashboard shell, and operating pattern can stay structurally similar across verticals, while:
-- palette
-- copy
-- agent emphasis
-- workflow details
-change per domain.
+The reusable pattern should be:
+- Work queue
+- persistent assistant
+- client workspace
+- calendar / results
+- domain-specific services underneath

@@ -25,9 +25,24 @@ Make the system stable, readable, and persuasive enough for real agency demos.
 ### Current blocker
 - bilingual workflow is not fully implemented yet
 
-## Phase 2: Bilingual Support
+## Phase 2: Strategy + Calendar Proof
 
-This is the next major implementation target.
+This is the next major monetizable implementation target.
+
+### Needed behavior
+- saved strategy plans per client
+- planned-but-not-scheduled items shown in Calendar
+- materialized strategy suggestions for operator review
+- early proof layer showing what was planned vs what shipped
+- real strategy prompts from Jarvis assistant
+
+### Files most likely to change
+- `strategy_agent.py`
+- `strategy_plan_store.py`
+- `webhook_server.py`
+- `jarvis-dashboard.html`
+
+## Phase 3: Bilingual Support
 
 ### Needed behavior
 - English brief synthesis
@@ -44,7 +59,7 @@ This is the next major implementation target.
 - `client_store.py`
 - `jarvis-dashboard.html`
 
-## Phase 3: Stable Public Delivery
+## Phase 4: Stable Public Delivery
 
 ### Goal
 Remove dependence on fragile rotating quick tunnels.
@@ -54,7 +69,7 @@ Remove dependence on fragile rotating quick tunnels.
 - production-like hosting path
 - verified Meta media fetchability
 
-## Phase 4: Deployment Hardening
+## Phase 5: Deployment Hardening
 
 ### Goal
 Run Jarvis as a serious hosted service instead of a local prototype stack.
@@ -66,7 +81,7 @@ Run Jarvis as a serious hosted service instead of a local prototype stack.
 - stable environment config
 - operational runbook
 
-## Phase 5: V2 Agency WhatsApp
+## Phase 6: V2 Agency WhatsApp
 
 Only after the above are stable.
 

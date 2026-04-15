@@ -8,6 +8,17 @@ import subprocess
 import schedule
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
+from contextlib import contextmanager
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 from client_store import get_data_backend_name
 from schedule_store import is_schedulable_job, load_schedule, mark_job_failed, schedule_signature
@@ -26,62 +37,106 @@ logging.basicConfig(level=logging.INFO, handlers=[_file_handler, _stream_handler
 logger = logging.getLogger("SchedulerDaemon")
 
 
+@contextmanager
+def job_execution_guard(job_id: str | None):
+    lock_handle = None
+    acquired = False
+    lock_path = None
+    try:
+        normalized_job_id = str(job_id or "").strip()
+        if normalized_job_id:
+            lock_path = f".scheduler_job_{normalized_job_id}.lock"
+            lock_handle = open(lock_path, "w")
+            if fcntl:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            elif msvcrt:
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                acquired = True
+            else:
+                acquired = True
+        else:
+            acquired = True
+        yield acquired
+    except (BlockingIOError, OSError):
+        yield False
+    finally:
+        if lock_handle is not None:
+            try:
+                if acquired and fcntl:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                elif acquired and msvcrt:
+                    lock_handle.seek(0)
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+            try:
+                lock_handle.close()
+            except Exception:
+                pass
+
+
 def run_pipeline(client: str, topic: str, images: list = None, videos: list = None, job_id: str | None = None, draft_name: str | None = None):
     """
     Spawns pipeline.py in an isolated subprocess.
     If the LLM crashes or Meta Tokens expire, this process terminates gracefully
     and returns an exit code without crashing the continuously running Scheduler Daemon.
     """
-    logger.info(f"? [TRIGGERED] Spawning pipeline.py for '{client}'...")
-    try:
-        cmd = [sys.executable, "pipeline.py", "--client", client, "--topic", topic]
-        if job_id:
-            cmd.extend(["--job-id", job_id])
-        if draft_name:
-            cmd.extend(["--draft-name", draft_name])
-        if images:
-            for img in images:
-                cmd.extend(["--image", img])
-        if videos:
-            for video in videos:
-                cmd.extend(["--video", video])
+    with job_execution_guard(job_id) as acquired:
+        if not acquired:
+            logger.warning(f"Skipping duplicate scheduler trigger for job '{job_id}' on client '{client}'.")
+            return
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-
-        if result.returncode == 0:
-            logger.info(f"? [SUCCESS] Pipeline completed successfully for '{client}'.")
-            logger.info(f"--- PIPELINE OUTPUT ---\n{result.stdout.strip()}\n-----------------------")
-        else:
-            logger.error(f"? [FAILURE] Pipeline crashed for '{client}' (Exit Code {result.returncode}).")
-            logger.error(f"Pipeline StdErr: {result.stderr}")
-            logger.error(f"Pipeline StdOut: {result.stdout}")
+        logger.info(f"? [TRIGGERED] Spawning pipeline.py for '{client}'...")
+        try:
+            cmd = [sys.executable, "pipeline.py", "--client", client, "--topic", topic]
             if job_id:
-                failure_reason = (result.stderr or result.stdout or "Pipeline execution failed.").strip()
-                try:
-                    mark_job_failed(job_id, reason=failure_reason[:500])
-                    logger.info(f"Marked job '{job_id}' as failed after pipeline error.")
-                except Exception as store_exc:
-                    logger.warning(f"Failed to mark job '{job_id}' as failed: {store_exc}")
+                cmd.extend(["--job-id", job_id])
+            if draft_name:
+                cmd.extend(["--draft-name", draft_name])
+            if images:
+                for img in images:
+                    cmd.extend(["--image", img])
+            if videos:
+                for video in videos:
+                    cmd.extend(["--video", video])
 
-    except subprocess.TimeoutExpired:
-        logger.error(f"⏰ [TIMEOUT] Pipeline timed out after 300s for '{client}'. Marking job as failed.")
-        if job_id:
-            try:
-                mark_job_failed(job_id, reason="Pipeline execution timed out after 300 seconds.")
-            except Exception as store_exc:
-                logger.warning(f"Failed to mark job '{job_id}' as failed after timeout: {store_exc}")
-    except Exception as e:
-        logger.error(f"💥 [FATAL] Failed to spawn subprocess for '{client}': {str(e)}")
-        if job_id:
-            try:
-                mark_job_failed(job_id, reason=str(e)[:500])
-            except Exception as store_exc:
-                logger.warning(f"Failed to mark job '{job_id}' as failed after fatal scheduler error: {store_exc}")
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if result.returncode == 0:
+                logger.info(f"? [SUCCESS] Pipeline completed successfully for '{client}'.")
+                logger.info(f"--- PIPELINE OUTPUT ---\n{result.stdout.strip()}\n-----------------------")
+            else:
+                logger.error(f"? [FAILURE] Pipeline crashed for '{client}' (Exit Code {result.returncode}).")
+                logger.error(f"Pipeline StdErr: {result.stderr}")
+                logger.error(f"Pipeline StdOut: {result.stdout}")
+                if job_id:
+                    failure_reason = (result.stderr or result.stdout or "Pipeline execution failed.").strip()
+                    try:
+                        mark_job_failed(job_id, reason=failure_reason[:500])
+                        logger.info(f"Marked job '{job_id}' as failed after pipeline error.")
+                    except Exception as store_exc:
+                        logger.warning(f"Failed to mark job '{job_id}' as failed: {store_exc}")
+
+        except subprocess.TimeoutExpired:
+            logger.error(f"⏰ [TIMEOUT] Pipeline timed out after 300s for '{client}'. Marking job as failed.")
+            if job_id:
+                try:
+                    mark_job_failed(job_id, reason="Pipeline execution timed out after 300 seconds.")
+                except Exception as store_exc:
+                    logger.warning(f"Failed to mark job '{job_id}' as failed after timeout: {store_exc}")
+        except Exception as e:
+            logger.error(f"💥 [FATAL] Failed to spawn subprocess for '{client}': {str(e)}")
+            if job_id:
+                try:
+                    mark_job_failed(job_id, reason=str(e)[:500])
+                except Exception as store_exc:
+                    logger.warning(f"Failed to mark job '{job_id}' as failed after fatal scheduler error: {store_exc}")
 
 
 def run_date_bound_pipeline(client: str, topic: str, scheduled_date: str, images: list = None, videos: list = None, job_id: str | None = None, draft_name: str | None = None):

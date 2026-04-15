@@ -2,9 +2,11 @@ import os
 import sys
 import json
 import logging
+import base64
 import requests
 import io
 import time
+import socket
 import collections
 from html import unescape as html_unescape
 from io import BytesIO
@@ -12,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, BackgroundTasks
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, Response, FileResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse, Response, FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,7 +24,7 @@ import uuid
 import re
 import subprocess
 import secrets
-from typing import Optional, List
+from typing import Optional, List, Any
 from urllib.parse import quote, urlparse
 from pypdf import PdfReader
 from docx import Document
@@ -69,13 +71,26 @@ from approval_store import (
     update_pending_approval,
 )
 from publish_run_store import delete_client_publish_runs, list_publish_runs
+from strategy_plan_store import (
+    delete_strategy_plan,
+    delete_client_strategy_plans,
+    get_strategy_plan,
+    list_strategy_plans,
+)
 from queue_store import (
     SUPPORTED_EXTENSIONS,
     VIDEO_EXTENSIONS,
     detect_media_kind,
     sanitize_topic_hint,
 )
+from orchestrator_agent import resolve_client_id
 from whatsapp_agent import run_whatsapp_agent, run_triage_agent
+from whatsapp_operator import build_meta_connect_link, handle_operator_message, is_operator_phone
+from whatsapp_transport import (
+    normalize_inbound_message,
+    send_button_message as transport_send_button_message,
+    send_text_message as transport_send_text_message,
+)
 from publish_agent import publish_agent
 from schedule_store import (
     add_scheduled_job,
@@ -87,8 +102,10 @@ from schedule_store import (
     remove_job,
     split_schedule_views,
 )
+from trend_research_service import build_client_trend_dossier, extract_website_digest, get_trend_research_health, search_recent
 from runtime_state_store import (
     delete_auth_session,
+    delete_operator_session_state,
     delete_expired_auth_sessions,
     get_auth_session,
     get_orchestrator_run_state,
@@ -97,6 +114,7 @@ from runtime_state_store import (
     load_reschedule_session_map,
     record_operator_audit_event,
     save_auth_session,
+    save_operator_session_state,
     save_orchestrator_run_state,
     save_reschedule_session_map,
     touch_auth_session,
@@ -106,6 +124,10 @@ load_dotenv()
 # The synthesizer used to run on Mistral Nemo. With no paid OpenRouter credits available,
 # keep intake on the lighter Qwen free route instead of the heavier 80B fallback.
 SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", "qwen/qwen3.6-plus-preview:free").strip() or "qwen/qwen3.6-plus-preview:free"
+SYNTHESIS_CONNECT_TIMEOUT_SECONDS = float(os.getenv("SYNTHESIS_CONNECT_TIMEOUT_SECONDS", "8"))
+SYNTHESIS_READ_TIMEOUT_SECONDS = float(os.getenv("SYNTHESIS_READ_TIMEOUT_SECONDS", "45"))
+SYNTHESIS_TOTAL_TIMEOUT_SECONDS = float(os.getenv("SYNTHESIS_TOTAL_TIMEOUT_SECONDS", "90"))
+SYNTHESIS_FAST_TIMEOUT_SECONDS = float(os.getenv("SYNTHESIS_FAST_TIMEOUT_SECONDS", "75"))
 SMART_DRAFT_REF_RE = re.compile(
     r'@\[(?P<client>[^\]]+)\]\s+(?:draft_id:"(?P<draft_id>[^"]+)"\s+)?draft:"(?P<draft>[^"]+)"',
     re.IGNORECASE,
@@ -131,6 +153,7 @@ RATE_LIMIT_DEFAULTS = {
     "auth_login": max(3, int(os.getenv("JARVIS_RATE_LIMIT_AUTH_LOGIN", "8") or "8")),
     "orchestrator_chat": max(10, int(os.getenv("JARVIS_RATE_LIMIT_ORCH_CHAT", "60") or "60")),
     "orchestrator_run": max(3, int(os.getenv("JARVIS_RATE_LIMIT_ORCH_RUN", "20") or "20")),
+    "strategy_plan": max(2, int(os.getenv("JARVIS_RATE_LIMIT_STRATEGY_PLAN", "20") or "20")),
     "synthesizer": max(1, int(os.getenv("JARVIS_RATE_LIMIT_SYNTH", "10") or "10")),
     "caption": max(2, int(os.getenv("JARVIS_RATE_LIMIT_CAPTION", "30") or "30")),
     "approval_action": max(3, int(os.getenv("JARVIS_RATE_LIMIT_APPROVAL_ACTION", "30") or "30")),
@@ -234,6 +257,8 @@ def _rate_limit_bucket_name(request: Request) -> str:
         return "orchestrator_chat"
     if path == "/api/orchestrator/run":
         return "orchestrator_run"
+    if path.startswith("/api/strategy/"):
+        return "strategy_plan"
     if path == "/api/synthesize-client":
         return "synthesizer"
     if path == "/api/caption/generate":
@@ -774,6 +799,14 @@ def _normalize_orchestrator_item_result(action: str, result: dict | str) -> dict
     }
 
 
+def _effective_orchestrator_approval_routing(run: dict, item: dict) -> str:
+    return normalize_approval_routing_mode(
+        item.get("approval_routing")
+        or run.get("approval_routing_override")
+        or get_approval_routing_mode()
+    )
+
+
 def _recompute_orchestrator_run_totals(run: dict) -> None:
     items = list(run.get("items") or [])
     totals = {
@@ -866,6 +899,8 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
             try:
                 action = str(item.get("action") or run["action"] or "").strip().lower()
                 item_schedule = _normalize_orchestrator_schedule_payload(item.get("schedule") or run.get("schedule"))
+                approval_routing_mode = _effective_orchestrator_approval_routing(run, item)
+                effective_action = "send_for_approval" if action == "schedule" and approval_routing_mode == "whatsapp_only" else action
                 schedule_days = [] if item_schedule["scheduled_date"] else ["today"]
                 _audit_event(
                     "orchestrator.item_started",
@@ -875,6 +910,8 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                         "draft_id": item.get("draft_id"),
                         "draft_name": item.get("draft_name"),
                         "action": action,
+                        "effective_action": effective_action,
+                        "approval_routing": approval_routing_mode,
                         "scheduled_date": item_schedule.get("scheduled_date"),
                         "time": item_schedule.get("time"),
                     },
@@ -891,10 +928,14 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                         draft_id=item.get("draft_id") or None,
                         topic=item.get("draft_name") or "",
                     )
-                elif action == "send_for_approval":
+                elif effective_action == "send_for_approval":
                     item["status"] = "publishing"
                     item["phase"] = "Routing Approval"
-                    item["message"] = "Jarvis is creating the approval card and preparing the review route."
+                    item["message"] = (
+                        "Jarvis is routing this release into the WhatsApp owner approval lane."
+                        if approval_routing_mode == "whatsapp_only"
+                        else "Jarvis is creating the approval card and preparing the review route."
+                    )
                     tool_result = await asyncio.to_thread(
                         approval_tool.execute,
                         client_id=item["client_id"],
@@ -904,7 +945,7 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                         bundle_name=item.get("draft_name"),
                         draft_id=item.get("draft_id") or None,
                         scheduled_date=item_schedule["scheduled_date"],
-                        approval_routing_override=item.get("approval_routing") or run.get("approval_routing_override") or None,
+                        approval_routing_override=approval_routing_mode,
                     )
                 else:
                     item["status"] = "publishing"
@@ -921,8 +962,8 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                         scheduled_date=item_schedule["scheduled_date"],
                     )
 
-                normalized_result = _normalize_orchestrator_item_result(action, tool_result)
-                if action == "send_for_approval" and isinstance(normalized_result.get("raw"), dict):
+                normalized_result = _normalize_orchestrator_item_result(effective_action, tool_result)
+                if effective_action == "send_for_approval" and isinstance(normalized_result.get("raw"), dict):
                     approval_id = str(normalized_result["raw"].get("approval_id") or "").strip()
                     if approval_id:
                         approval_job = get_pending_approval(approval_id)
@@ -950,6 +991,7 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                         "draft_id": item.get("draft_id"),
                         "draft_name": item.get("draft_name"),
                         "action": action,
+                        "effective_action": effective_action,
                         "status": item.get("status"),
                         "message": item.get("message"),
                     },
@@ -1256,18 +1298,23 @@ async def api_serve_asset(request: Request, client_id: str, filename: str):
     )
 
 def get_agency_config() -> dict:
-    config = {}
+    file_config = {}
     if os.path.exists("agency_config.json"):
         try:
             with open("agency_config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
+                file_config = json.load(f)
         except Exception:
-            pass
-    config.setdefault("owner_phone", os.getenv("OWNER_PHONE", "").strip())
-    config.setdefault("whatsapp_access_token", os.getenv("WHATSAPP_TOKEN", "").strip())
-    config.setdefault("whatsapp_phone_id", os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID", "").strip())
-    config.setdefault("approval_routing", "desktop_first")
-    return config
+            file_config = {}
+    env_owner_phone = os.getenv("OWNER_PHONE", "").strip()
+    env_whatsapp_token = os.getenv("WHATSAPP_TOKEN", "").strip()
+    env_whatsapp_phone_id = os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID", "").strip()
+    return {
+        "owner_phone": env_owner_phone or str(file_config.get("owner_phone") or "").strip(),
+        # Agency-level WhatsApp runtime secrets are env-managed in production.
+        "whatsapp_access_token": env_whatsapp_token,
+        "whatsapp_phone_id": env_whatsapp_phone_id,
+        "approval_routing": str(file_config.get("approval_routing") or "desktop_first").strip() or "desktop_first",
+    }
 
 
 def get_whatsapp_runtime_config() -> tuple[str, str]:
@@ -1275,6 +1322,39 @@ def get_whatsapp_runtime_config() -> tuple[str, str]:
     token = str(config.get("whatsapp_access_token", "")).strip()
     phone_id = str(config.get("whatsapp_phone_id", "")).strip()
     return token, phone_id
+
+
+def _meta_oauth_redirect_uri() -> str:
+    explicit = str(os.getenv("META_OAUTH_REDIRECT_URI") or "").strip()
+    if explicit:
+        return explicit
+    public_base = str(os.getenv("META_OAUTH_PUBLIC_BASE_URL") or os.getenv("WEBHOOK_PROXY_URL") or "").strip().rstrip("/")
+    return f"{public_base}/api/meta-oauth-callback" if public_base else ""
+
+
+def _decode_meta_oauth_state(raw_state: str) -> dict[str, Any]:
+    text = str(raw_state or "").strip()
+    if not text:
+        return {}
+    padding = "=" * (-len(text) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(f"{text}{padding}".encode("ascii")).decode("utf-8")
+        payload = json.loads(decoded)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _score_meta_page_match(client_id: str, page: dict[str, Any], profile: dict[str, Any]) -> int:
+    business_name = str((profile or {}).get("business_name") or "").strip().lower()
+    client_tokens = {token for token in re.split(r"[^a-z0-9]+", str(client_id or "").lower()) if token}
+    business_tokens = {token for token in re.split(r"[^a-z0-9]+", business_name) if token}
+    wanted = client_tokens | business_tokens
+    page_name = str((page or {}).get("name") or "").strip().lower()
+    page_tokens = {token for token in re.split(r"[^a-z0-9]+", page_name) if token}
+    overlap = len(wanted & page_tokens)
+    ig_block = page.get("instagram_business_account") or {}
+    return overlap + (20 if ig_block.get("id") else 0)
 
 
 def normalize_approval_routing_mode(value: str | None) -> str:
@@ -1440,14 +1520,21 @@ def send_pending_approval_to_whatsapp(approval_id: str, phone: str | None = None
     if not job:
         return {"success": False, "error": f"Approval ID {approval_id} not found."}
 
-    target_phone = str(phone or get_agency_config().get("owner_phone", "")).strip()
+    target_phone = _normalize_whatsapp_phone(phone or get_agency_config().get("owner_phone", ""))
     if not target_phone:
         return {"success": False, "error": "OWNER_PHONE is missing from Agency Settings."}
-    window_open, window_reason = whatsapp_reply_window_open(target_phone)
-    if not window_open:
-        return {"success": False, "error": window_reason}
 
     result = send_interactive_whatsapp_approval(target_phone, approval_id, build_approval_preview(job))
+    if not result.get("success"):
+        window_open, window_reason = whatsapp_reply_window_open(target_phone)
+        error_text = str(result.get("error") or "").strip()
+        if (not window_open) and (
+            "131047" in error_text
+            or "Re-engagement message" in error_text
+            or "24 hour" in error_text
+            or "24-hour" in error_text
+        ):
+            result["error"] = window_reason
     updated = mark_approval_whatsapp_sent(job, result.get("success"))
     update_pending_approval(approval_id, updated)
     return result
@@ -1671,6 +1758,14 @@ def save_reschedule_sessions(data: dict) -> None:
     save_reschedule_session_map(data)
 
 
+def _normalize_whatsapp_phone(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits or raw.lstrip("+")
+
+
 def load_whatsapp_contact_windows() -> dict:
     if os.path.exists("whatsapp_contact_windows.json"):
         try:
@@ -1687,7 +1782,7 @@ def save_whatsapp_contact_windows(data: dict) -> None:
 
 
 def record_whatsapp_inbound(phone: str, timestamp_value: str | int | None = None) -> None:
-    target_phone = str(phone or "").strip()
+    target_phone = _normalize_whatsapp_phone(phone)
     if not target_phone:
         return
     recorded_at = datetime.now(timezone.utc)
@@ -1706,7 +1801,7 @@ def record_whatsapp_inbound(phone: str, timestamp_value: str | int | None = None
 
 
 def get_last_whatsapp_inbound_at(phone: str) -> datetime | None:
-    target_phone = str(phone or "").strip()
+    target_phone = _normalize_whatsapp_phone(phone)
     if not target_phone:
         return None
     windows = load_whatsapp_contact_windows()
@@ -1876,114 +1971,33 @@ def send_whatsapp_message(to_phone: str, text: str):
     """
     Uses the Meta API to send an outbound WhatsApp reply directly to a phone number.
     """
-    whatsapp_token, whatsapp_phone_id = get_whatsapp_runtime_config()
-    if not whatsapp_token or not whatsapp_phone_id:
-        logger.error("SYSTEM | ERROR | META CREDENTIALS MISSING IN AGENCY CONFIG OR .ENV")
-        return {"success": False, "error": "Missing WhatsApp token or phone ID."}
-
-    url = f"https://graph.facebook.com/v22.0/{whatsapp_phone_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {whatsapp_token}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "text",
-        "text": {"body": text}
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        return {"success": True, "status_code": response.status_code}
-    except Exception as e:
-        detail = ""
-        if getattr(e, "response", None) is not None:
-            detail = e.response.text[:200]
-        logger.error(f"SYSTEM | ERROR | FB Graph API Failed to send message: {e} | {detail}")
-        return {"success": False, "error": detail or str(e)}
+    return transport_send_text_message(to_phone, text)
 
 
 def send_interactive_whatsapp_approval(to_phone: str, approval_id: str, preview_text: str):
-    whatsapp_token, whatsapp_phone_id = get_whatsapp_runtime_config()
-    if not whatsapp_token or not whatsapp_phone_id:
-        logger.error("SYSTEM | ERROR | META CREDENTIALS MISSING IN AGENCY CONFIG OR .ENV")
-        return {"success": False, "error": "Missing WhatsApp token or phone ID."}
-
-    url = f"https://graph.facebook.com/v22.0/{whatsapp_phone_id}/messages"
-    headers = {
-        "Authorization": f"Bearer {whatsapp_token}",
-        "Content-Type": "application/json"
-    }
-
     safe_text = preview_text[:700] + "..." if len(preview_text) > 700 else preview_text
     accent = HEADER_ACCENTS[sum(ord(ch) for ch in approval_id) % len(HEADER_ACCENTS)]
-
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to_phone,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "header": {
-                "type": "text",
-                "text": f"JARVIS | Campaign Ready {accent}"
-            },
-            "body": {
-                "text": safe_text
-            },
-            "footer": {
-                "text": f"Agency OS • Ref {approval_id}"
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": f"APPROVE_{approval_id}",
-                            "title": "Approve"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": f"REJECT_{approval_id}",
-                            "title": "Refine"
-                        }
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": f"MOVE_{approval_id}",
-                            "title": "Move Time"
-                        }
-                    }
-                ]
-            }
-        }
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        response_data = response.json()
+    result = transport_send_button_message(
+        to_phone,
+        header_text=f"JARVIS | Campaign Ready {accent}",
+        body_text=safe_text,
+        footer_text=f"Agency OS • Ref {approval_id}",
+        buttons=[
+            {"id": f"APPROVE_{approval_id}", "title": "Approve"},
+            {"id": f"REJECT_{approval_id}", "title": "Refine"},
+            {"id": f"MOVE_{approval_id}", "title": "Move Time"},
+        ],
+    )
+    if result.get("success"):
         logger.info(
-            f"SYSTEM | INTERACTIVE APPROVAL SENT TO {to_phone} FOR ID {approval_id} | RESPONSE {json.dumps(response_data, ensure_ascii=False)}"
+            "SYSTEM | INTERACTIVE APPROVAL SENT TO %s FOR ID %s | RESPONSE %s",
+            to_phone,
+            approval_id,
+            json.dumps(result.get("response") or {}, ensure_ascii=False),
         )
-        return {
-            "success": True,
-            "status_code": response.status_code,
-            "response": response_data,
-            "fallback_text_sent": False,
-            "fallback_error": None,
-        }
-    except Exception as e:
-        detail = ""
-        if getattr(e, "response", None) is not None:
-            detail = e.response.text[:200]
-        logger.error(f"SYSTEM | ERROR | FB Graph Interactive Failed: {e} | {detail}")
-        return {"success": False, "error": detail or str(e)}
+        result.setdefault("fallback_text_sent", False)
+        result.setdefault("fallback_error", None)
+    return result
 
 # =========================================================
 # WEBHOOK ENDPOINTS
@@ -2009,6 +2023,123 @@ async def verify_webhook(request: Request):
         return PlainTextResponse(content=challenge)
         
     raise HTTPException(status_code=403, detail="Forbidden: Invalid token.")
+
+
+@app.get("/api/meta-oauth/start")
+async def api_meta_oauth_start(client_id: str, phone: str = "", state: str = ""):
+    app_id = str(os.getenv("META_APP_ID") or "").strip()
+    redirect_uri = _meta_oauth_redirect_uri()
+    if not app_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="META_APP_ID or META_OAUTH_REDIRECT_URI is not configured.")
+    safe_client_id = resolve_client_id(client_id)
+    safe_phone = _normalize_whatsapp_phone(phone)
+    oauth_state = str(state or "").strip()
+    if not oauth_state:
+        generated_link = build_meta_connect_link(safe_client_id, safe_phone)
+        if "state=" in generated_link:
+            oauth_state = generated_link.split("state=", 1)[-1].split("&", 1)[0]
+    if not oauth_state:
+        raise HTTPException(status_code=500, detail="Jarvis could not generate a Meta OAuth state token.")
+    if safe_phone:
+        save_operator_session_state(
+            safe_phone,
+            {
+                "mode": "connect_wait",
+                "pending_connect_client_id": safe_client_id,
+                "pending_connect_state": oauth_state,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    auth_url = (
+        f"https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth"
+        f"?client_id={quote(app_id)}"
+        f"&redirect_uri={quote(redirect_uri, safe='')}"
+        f"&state={quote(oauth_state, safe='')}"
+        f"&scope={quote(str(os.getenv('META_OAUTH_SCOPES') or 'pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish,business_management'), safe=',')}"
+    )
+    return RedirectResponse(auth_url)
+
+
+@app.get("/api/meta-oauth-callback")
+async def api_meta_oauth_callback(code: str | None = None, state: str = "", error: str | None = None, error_description: str | None = None):
+    decoded_state = _decode_meta_oauth_state(state)
+    client_id = resolve_client_id(str(decoded_state.get("client_id") or "").strip())
+    operator_phone = _normalize_whatsapp_phone(decoded_state.get("operator_phone"))
+    if error:
+        if operator_phone:
+            send_whatsapp_message(operator_phone, f"Meta connect failed for {client_id or 'that client'}: {error_description or error}")
+        return PlainTextResponse("Meta connection failed. You can return to WhatsApp.")
+    if not code or not client_id:
+        raise HTTPException(status_code=400, detail="Missing OAuth code or client context.")
+
+    app_id = str(os.getenv("META_APP_ID") or "").strip()
+    app_secret = str(os.getenv("META_APP_SECRET") or "").strip()
+    redirect_uri = _meta_oauth_redirect_uri()
+    if not app_id or not app_secret or not redirect_uri:
+        raise HTTPException(status_code=500, detail="Meta OAuth environment is incomplete.")
+
+    token_response = requests.get(
+        f"https://graph.facebook.com/{GRAPH_API_VERSION}/oauth/access_token",
+        params={
+            "client_id": app_id,
+            "client_secret": app_secret,
+            "redirect_uri": redirect_uri,
+            "code": code,
+        },
+        timeout=20,
+    )
+    token_response.raise_for_status()
+    access_payload = token_response.json() if token_response.content else {}
+    user_token = str(access_payload.get("access_token") or "").strip()
+    if not user_token:
+        raise HTTPException(status_code=400, detail="Meta OAuth did not return an access token.")
+
+    pages_response = requests.get(
+        f"https://graph.facebook.com/{GRAPH_API_VERSION}/me/accounts",
+        params={
+            "access_token": user_token,
+            "fields": "id,name,access_token,instagram_business_account{id,username}",
+        },
+        timeout=20,
+    )
+    pages_response.raise_for_status()
+    pages = list((pages_response.json() or {}).get("data") or [])
+    client_payload = get_client_store().get_client(client_id) or {}
+    profile = dict(client_payload.get("profile_json") or {})
+    if not pages:
+        if operator_phone:
+            send_whatsapp_message(operator_phone, f"Meta connect failed for {client_id}: no manageable Facebook Pages were found on that login.")
+        return PlainTextResponse("No manageable Meta Pages were found. You can return to WhatsApp.")
+
+    best_page = max(pages, key=lambda item: _score_meta_page_match(client_id, item, profile))
+    ig_block = best_page.get("instagram_business_account") or {}
+    if not ig_block.get("id"):
+        if operator_phone:
+            send_whatsapp_message(operator_phone, f"Meta connect failed for {client_id}: the selected Facebook Page has no linked Instagram professional account.")
+        return PlainTextResponse("Selected Meta Page has no linked Instagram professional account.")
+
+    updated_client = dict(client_payload)
+    updated_client["client_id"] = client_id
+    updated_client["meta_access_token"] = str(best_page.get("access_token") or user_token).strip()
+    updated_client["facebook_page_id"] = str(best_page.get("id") or "").strip()
+    updated_client["instagram_account_id"] = str(ig_block.get("id") or "").strip()
+    profile["instagram_connected"] = True
+    profile["connected_facebook_page_name"] = str(best_page.get("name") or "").strip()
+    profile["connected_instagram_username"] = str(ig_block.get("username") or "").strip()
+    updated_client["profile_json"] = profile
+    get_client_store().save_client(client_id, updated_client)
+    if operator_phone:
+        delete_operator_session_state(operator_phone)
+        send_whatsapp_message(
+            operator_phone,
+            (
+                f"{format_client_label(client_id)} is now connected.\n"
+                f"Facebook Page: {best_page.get('name')}\n"
+                f"Instagram: {ig_block.get('username') or ig_block.get('id')}\n"
+                "You can go back to WhatsApp and continue posting."
+            ),
+        )
+    return PlainTextResponse("Meta account connected. You can return to WhatsApp.")
 
 @app.post("/webhook")
 async def receive_message(request: Request):
@@ -2040,19 +2171,37 @@ async def receive_message(request: Request):
                  
                 if "messages" in value:
                     for message in value["messages"]:
-                        # Extract the exact payload requirements
-                        sender_phone = message.get("from")
-                        record_whatsapp_inbound(sender_phone, message.get("timestamp"))
-                        msg_type = message.get("type")
-                        
-                        # We only analyze standard text interactions to prevent crashing on Voice notes/Images
+                        normalized_message = normalize_inbound_message(message)
+                        sender_phone = normalized_message.get("from")
+                        record_whatsapp_inbound(sender_phone, normalized_message.get("timestamp"))
+                        msg_type = normalized_message.get("type")
+
+                        if is_operator_phone(sender_phone):
+                            if msg_type == "interactive":
+                                reply_id = str(normalized_message.get("interactive_reply_id") or "").strip()
+                                if reply_id.startswith(("APPROVE_", "REJECT_", "MOVE_")):
+                                    await handle_interactive_reply(sender_phone, reply_id)
+                                elif reply_id:
+                                    await handle_operator_message(normalized_message)
+                                continue
+                            if msg_type == "text":
+                                raw_text = str(normalized_message.get("text") or "").strip()
+                                command_match = re.match(r"^\s*(APPROVE|REJECT)[\s_-]+([A-Z0-9]+)\s*$", raw_text, re.IGNORECASE)
+                                reschedule_session = load_reschedule_sessions().get(sender_phone) or {}
+                                _, new_time, _new_days, _new_scheduled_date = parse_owner_reschedule_command(raw_text)
+                                if command_match or new_time or reschedule_session:
+                                    await handle_inbound_text(sender_phone, raw_text)
+                                else:
+                                    await handle_operator_message(normalized_message)
+                                continue
+                            if msg_type in {"document", "image", "video"}:
+                                await handle_operator_message(normalized_message)
+                                continue
+
                         if msg_type == "text":
-                            msg_body = message["text"]["body"]
-                            await handle_inbound_text(sender_phone, msg_body)
+                            await handle_inbound_text(sender_phone, str(normalized_message.get("text") or ""))
                         elif msg_type == "interactive":
-                            # Phase 14: Interactive Buttons
-                            reply = message["interactive"].get("button_reply", {})
-                            reply_id = reply.get("id")
+                            reply_id = str(normalized_message.get("interactive_reply_id") or "").strip()
                             if reply_id:
                                 await handle_interactive_reply(sender_phone, reply_id)
                             
@@ -2194,16 +2343,17 @@ async def handle_inbound_text(phone: str, msg_body: str):
     """
     Applies the logical architecture mapping to inbound text streams.
     """
-    agency_phone = str(get_agency_config().get("owner_phone", "")).strip()
+    normalized_phone = _normalize_whatsapp_phone(phone)
+    agency_phone = _normalize_whatsapp_phone(get_agency_config().get("owner_phone", ""))
     command_match = re.match(r"^\s*(APPROVE|REJECT)[\s_-]+([A-Z0-9]+)\s*$", msg_body.strip(), re.IGNORECASE)
-    if agency_phone and phone == agency_phone and command_match:
+    if agency_phone and normalized_phone == agency_phone and command_match:
         action = command_match.group(1).upper()
         approval_id = command_match.group(2).upper()
         logger.info(f"{phone} | SYSTEM | TEXT_APPROVAL | {action}_{approval_id}")
         await handle_interactive_reply(phone, f"{action}_{approval_id}")
         return
 
-    if agency_phone and phone == agency_phone:
+    if agency_phone and normalized_phone == agency_phone:
         approval_id, new_time, new_days, new_scheduled_date = parse_owner_reschedule_command(msg_body)
         if new_time:
             pending = list_pending_approvals()
@@ -2518,9 +2668,10 @@ def _prepare_synthesis_context(
     quick_intake: QuickIntakeRequest | dict | None,
     website_url: str | None,
     social_url: str | None,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], dict[str, Any]]:
     sections: list[str] = []
     warnings: list[str] = []
+    enrichments: dict[str, Any] = {}
 
     quick_section = _prepare_quick_intake_section(quick_intake)
     if quick_section:
@@ -2532,6 +2683,19 @@ def _prepare_synthesis_context(
 
     normalized_website = _normalize_public_source_url(website_url)
     if normalized_website:
+        website_digest = extract_website_digest(normalized_website)
+        if isinstance(website_digest, dict) and str(website_digest.get("status") or "").strip() == "success":
+            enrichments["website_digest"] = website_digest
+            enrichments["website_url"] = normalized_website
+            sections.append(
+                "Website digest (structured enrichment)\n"
+                f"URL: {normalized_website}\n"
+                f"{json.dumps(website_digest, ensure_ascii=False)}"
+            )
+        else:
+            website_reason = str((website_digest or {}).get("reason") or "Website digest extraction failed.").strip()
+            if website_reason:
+                warnings.append(website_reason)
         website_text, website_warning = _fetch_public_reference_text(normalized_website, "Website")
         if website_text:
             sections.append(f"Website reference (secondary source)\nURL: {normalized_website}\n{website_text}")
@@ -2555,7 +2719,7 @@ def _prepare_synthesis_context(
         warnings.append("Social page URL could not be normalized.")
 
     combined = "\n\n".join(section for section in sections if str(section or "").strip())
-    return _prepare_brief_for_synthesis(combined), warnings
+    return _prepare_brief_for_synthesis(combined), warnings, enrichments
 
 
 def _normalize_language_profile(profile: dict, raw_context: str) -> dict:
@@ -2641,13 +2805,32 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
         "caption_output_language": "arabic",
         "arabic_mode": "gulf"
     })
+    main_language = str(profile.get("main_language") or "").strip().lower()
+    if main_language not in {"arabic", "english", "both"}:
+        caption_language = str(language_profile.get("caption_output_language") or "").strip().lower()
+        main_language = "both" if caption_language == "bilingual" else (caption_language or "english")
+    city_market = str(
+        profile.get("city_market")
+        or profile.get("market")
+        or profile.get("city")
+        or profile.get("location")
+        or ""
+    ).strip()
     services = _as_clean_list(profile.get("services"))
     dos_and_donts = _as_clean_list(profile.get("dos_and_donts"))
     voice_examples = _as_clean_list(profile.get("brand_voice_examples"))
+    website_digest = profile.get("website_digest") or {}
+    if not isinstance(website_digest, dict):
+        website_digest = {}
+    trend_dossier = profile.get("trend_dossier") or {}
+    if not isinstance(trend_dossier, dict):
+        trend_dossier = {}
 
     caption_profile = {
         "business_name": profile.get("business_name", client_id),
         "industry": profile.get("industry", "general"),
+        "main_language": main_language,
+        "city_market": city_market,
         "audience_summary": str(profile.get("target_audience", "")).strip(),
         "offer_summary": ", ".join(services[:6]),
         "voice_rules": [
@@ -2659,6 +2842,46 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
         "do_avoid_rules": dos_and_donts[:8],
         "seo_keywords": _as_clean_list(profile.get("seo_keywords"))[:8],
         "language_profile": language_profile,
+        "website_url": str(profile.get("website_url") or website_digest.get("url") or "").strip(),
+        "website_digest": {
+            "url": str(website_digest.get("url") or "").strip(),
+            "title": str(website_digest.get("title") or "").strip(),
+            "meta_description": str(website_digest.get("meta_description") or "").strip(),
+            "headings": _as_clean_list(website_digest.get("headings") or [*(website_digest.get("h1") or []), *(website_digest.get("h2") or [])])[:8],
+            "service_terms": _as_clean_list(website_digest.get("service_terms"))[:8],
+            "brand_keywords": _as_clean_list(website_digest.get("brand_keywords"))[:8],
+        },
+        "trend_dossier": {
+            "status": str(trend_dossier.get("status") or "").strip(),
+            "provider": str(trend_dossier.get("provider") or "").strip(),
+            "recency_days": trend_dossier.get("recency_days") or 30,
+            "source_coverage": str(trend_dossier.get("source_coverage") or "").strip(),
+            "recent_signals": _as_clean_list(trend_dossier.get("recent_signals"))[:12],
+            "trend_angles": trend_dossier.get("trend_angles") if isinstance(trend_dossier.get("trend_angles"), list) else [],
+            "hook_patterns": _as_clean_list(trend_dossier.get("hook_patterns"))[:8],
+            "hashtag_candidates": _as_clean_list(trend_dossier.get("hashtag_candidates"))[:10],
+            "topical_language": _as_clean_list(trend_dossier.get("topical_language"))[:10],
+            "anti_cliche_guidance": _as_clean_list(trend_dossier.get("anti_cliche_guidance"))[:8],
+            "source_links": [
+                {
+                    "title": str(item.get("title") or item.get("label") or "Source").strip(),
+                    "url": str(item.get("url") or item.get("link") or "").strip(),
+                    "published_at": str(item.get("published_at") or "").strip(),
+                }
+                for item in (trend_dossier.get("source_link_details") or trend_dossier.get("source_links") or [])
+                if isinstance(item, dict) and str(item.get("url") or item.get("link") or "").strip()
+            ][:6] or [
+                {
+                    "title": "Source",
+                    "url": str(item).strip(),
+                    "published_at": "",
+                }
+                for item in (trend_dossier.get("source_links") or [])
+                if not isinstance(item, dict) and str(item).strip()
+            ][:6],
+            "fetched_at": str(trend_dossier.get("fetched_at") or "").strip(),
+            "expires_at": str(trend_dossier.get("expires_at") or "").strip(),
+        },
         "cta_style": str(
             profile.get("cta_style")
             or profile.get("conversion_goal")
@@ -2669,6 +2892,8 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
         "client_name": client_id,
         "business_name": profile.get("business_name", client_id),
         "industry": profile.get("industry", "general"),
+        "main_language": main_language,
+        "city_market": city_market,
         "brand_voice": {
             "tone": str(tone or "professional, friendly, engaging").strip(),
             "style": str(voice.get("style") or profile.get("style") or "conversational").strip(),
@@ -2684,7 +2909,10 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
         "language_profile": language_profile,
         "identity": str(profile.get("identity", "")).strip(),
         "dos_and_donts": dos_and_donts,
+        "website_url": str(profile.get("website_url") or website_digest.get("url") or "").strip(),
         "caption_profile": caption_profile,
+        "website_digest": caption_profile["website_digest"],
+        "trend_dossier": caption_profile["trend_dossier"],
         "caption_defaults": profile.get("caption_defaults", {
             "min_length": 150,
             "max_length": 300,
@@ -2875,6 +3103,50 @@ def _collect_dashboard_state() -> dict:
             "media_kind": candidate.get("media_kind") or "",
         }
 
+    recent_failed_publish_runs = []
+    failed_runs = [
+        run for run in list_publish_runs()
+        if str(run.get("status") or "").strip().lower() in {"error", "failed"}
+    ]
+    failed_runs.sort(key=lambda run: _parse_run_timestamp(run.get("created_at")) or datetime.min, reverse=True)
+    for run in failed_runs[:6]:
+        raw_output = {}
+        try:
+            raw_output = json.loads(str(run.get("raw_output") or "{}"))
+        except Exception:
+            raw_output = {}
+        platform_results = run.get("platform_results") if isinstance(run.get("platform_results"), dict) else {}
+        if not platform_results and isinstance(raw_output.get("platform_results"), dict):
+            platform_results = raw_output.get("platform_results") or {}
+        platform_errors = []
+        for platform_name, platform_data in platform_results.items():
+            if str((platform_data or {}).get("status") or "").strip().lower() != "error":
+                continue
+            error_message = str((platform_data or {}).get("error_message") or "").strip()
+            if not error_message:
+                continue
+            platform_errors.append({
+                "platform": str(platform_name or "").strip(),
+                "message": error_message,
+                "step": str((platform_data or {}).get("step") or "").strip(),
+            })
+        summary = str(raw_output.get("message") or run.get("failure_step") or "Scheduled publish failed.").strip()
+        if platform_errors:
+            primary = platform_errors[0]
+            step_label = f" ({primary['step']})" if primary.get("step") else ""
+            summary = f"{primary['platform'].capitalize()}: {primary['message']}{step_label}"
+        recent_failed_publish_runs.append({
+            "run_id": str(run.get("run_id") or "").strip(),
+            "client_id": str(run.get("client_id") or "").strip(),
+            "topic": str(run.get("topic") or "").strip(),
+            "draft_id": str(run.get("draft_id") or "").strip(),
+            "job_id": str(run.get("job_id") or "").strip(),
+            "created_at": run.get("created_at"),
+            "failure_step": str(run.get("failure_step") or "").strip(),
+            "summary": summary,
+            "platform_errors": platform_errors[:3],
+        })
+
     return {
         "clients": clients,
         "client_count": len(client_ids),
@@ -2892,6 +3164,7 @@ def _collect_dashboard_state() -> dict:
         "agency_config": agency_config,
         "next_job": next_job,
         "recent_activity": _read_log_tail("pipeline_stream.log", limit=6),
+        "recent_failed_publish_runs": recent_failed_publish_runs,
     }
 
 
@@ -2945,7 +3218,7 @@ def _build_agent_status_cards(state: dict) -> list[dict]:
         ),
         card(
             "synthesizer",
-            "Client Synthesizer",
+            "Brand Profile Synthesis",
             "webhook_server.py",
             "Live" if _recent_activity_mentions(activity, ["API | SYNTHESIZE"]) else ("Ready" if client_count else "Waiting"),
             "on" if client_count else "warn",
@@ -2953,7 +3226,7 @@ def _build_agent_status_cards(state: dict) -> list[dict]:
         ),
         card(
             "caption",
-            "Caption Agent",
+            "Caption Service",
             "caption_agent.py",
             "Live" if _recent_activity_mentions(activity, ["GENERATED TEXT", "Caption", "caption"]) else ("Ready" if draft_count else "Waiting"),
             "on" if draft_count else "warn",
@@ -2961,7 +3234,7 @@ def _build_agent_status_cards(state: dict) -> list[dict]:
         ),
         card(
             "publish",
-            "Publish Agent",
+            "Publishing Engine",
             "publish_agent.py",
             "Live" if _recent_activity_mentions(activity, ["PUBLISHING RESULTS", "PIPELINE FINAL REPORT", "PIPELINE_STATUS"]) else ("Ready" if client_count else "Waiting"),
             "on" if client_count else "warn",
@@ -2977,7 +3250,7 @@ def _build_agent_status_cards(state: dict) -> list[dict]:
         ),
         card(
             "whatsapp",
-            "WhatsApp Control",
+            "WhatsApp Approval Router",
             "whatsapp_agent.py",
             "Live" if agency_notifications_ready else "Setup",
             "on" if agency_notifications_ready else "warn",
@@ -3216,6 +3489,7 @@ async def api_dashboard_summary():
                 for client in state["clients"]
             ],
             "recent_activity": state["recent_activity"],
+            "recent_failed_publish_runs": state["recent_failed_publish_runs"],
             "agent_cards": agent_cards,
         }
     }
@@ -3286,6 +3560,14 @@ def _validate_public_media_runtime() -> dict:
         return {"ok": False, "configured": True, "detail": f"Public media host points to a local-only address: {media_base}"}
     if not media_base.startswith("https://"):
         return {"ok": False, "configured": True, "detail": f"Public media host must use HTTPS: {media_base}"}
+    try:
+        parsed = urlparse(media_base)
+        hostname = str(parsed.hostname or "").strip()
+        if not hostname:
+            return {"ok": False, "configured": True, "detail": f"Public media host has no valid hostname: {media_base}"}
+        socket.getaddrinfo(hostname, parsed.port or 443)
+    except Exception as exc:
+        return {"ok": False, "configured": True, "detail": f"Public media host is configured but not resolvable right now: {media_base} ({exc})"}
     return {"ok": True, "configured": True, "detail": f"Public media host is set to {media_base}."}
 
 
@@ -3416,6 +3698,7 @@ async def api_health():
             "client_count": state["client_count"],
             "draft_count": state["draft_count"],
             "pending_approval_count": state["pending_approval_count"],
+            "trend_research": get_trend_research_health(),
         },
         "readiness": readiness,
         "startup_validation": _startup_validation_snapshot,
@@ -3599,7 +3882,7 @@ async def api_synthesize_client(req: SynthesizeRequest):
     if not api_key:
         raise HTTPException(status_code=500, detail="Missing OPENROUTER_API_KEY in .env")
 
-    synthesis_context, source_warnings = await asyncio.to_thread(
+    synthesis_context, source_warnings, enrichments = await asyncio.to_thread(
         _prepare_synthesis_context,
         req.raw_context,
         req.quick_intake,
@@ -3612,7 +3895,70 @@ async def api_synthesize_client(req: SynthesizeRequest):
             "reason": "Add a few quick client details, a website/social page, or extra notes before Jarvis can build the profile.",
         }
 
-    prompt = f"""You are an expert Brand Strategist AND Data Extraction Specialist.
+    quick_intake_only = bool(
+        req.quick_intake
+        and not str(req.raw_context or "").strip()
+        and not str(req.website_url or "").strip()
+        and not str(req.social_url or "").strip()
+    )
+
+    if quick_intake_only:
+        prompt = f"""You are a brand profile extractor.
+Read the client intake and return one JSON object only.
+
+Client Name: {req.client_name}
+Client Intake:
+{synthesis_context}
+
+Rules:
+- Operator answers are the source of truth.
+- Do not invent important details.
+- If a field is unknown, leave it empty or [] and include it in missing_fields.
+- Keep the response compact and usable.
+- For language_profile:
+  - brief_language: english, arabic, or bilingual
+  - primary_language: english, arabic, or bilingual
+  - caption_output_language: english, arabic, or bilingual
+  - arabic_mode: gulf or msa when Arabic output is chosen, else ""
+
+Return valid JSON only in this exact shape:
+{{
+  "status": "success",
+  "missing_fields": [],
+  "data": {{
+    "business_name": "",
+    "industry": "",
+    "language_profile": {{
+      "brief_language": "",
+      "primary_language": "",
+      "caption_output_language": "",
+      "arabic_mode": ""
+    }},
+    "brand_voice": {{
+      "tone": "",
+      "style": "",
+      "dialect": "",
+      "dialect_notes": ""
+    }},
+    "services": [],
+    "target_audience": "",
+    "brand_voice_examples": [],
+    "seo_keywords": [],
+    "hashtag_bank": [],
+    "banned_words": [],
+    "caption_defaults": {{
+      "min_length": 150,
+      "max_length": 300,
+      "hashtag_count_min": 3,
+      "hashtag_count_max": 5
+    }},
+    "identity": "",
+    "dos_and_donts": []
+  }}
+}}
+"""
+    else:
+        prompt = f"""You are an expert Brand Strategist AND Data Extraction Specialist.
 Your job is to read raw notes/documents from a business owner and extract a complete brand profile.
 
 Client Name: {req.client_name}
@@ -3677,31 +4023,71 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
-        "max_tokens": 1600,
+        "max_tokens": 1000 if quick_intake_only else 1600,
     }
     
     try:
+        total_timeout_seconds = SYNTHESIS_FAST_TIMEOUT_SECONDS if quick_intake_only else SYNTHESIS_TOTAL_TIMEOUT_SECONDS
+        started_at = time.monotonic()
         fallback_models = []
         if SYNTHESIZER_MODEL:
             fallback_models.append(SYNTHESIZER_MODEL)
-        if "qwen/qwen3.6-plus-preview:free" not in fallback_models:
+        if not quick_intake_only and "qwen/qwen3.6-plus-preview:free" not in fallback_models:
             fallback_models.append("qwen/qwen3.6-plus-preview:free")
-        if "qwen/qwen3-next-80b-a3b-instruct:free" not in fallback_models:
+        if not quick_intake_only and "qwen/qwen3-next-80b-a3b-instruct:free" not in fallback_models:
             fallback_models.append("qwen/qwen3-next-80b-a3b-instruct:free")
 
         provider_error = None
+        token_budgets = (1000,) if quick_intake_only else (1600, 2200)
         for candidate_model in fallback_models:
-            for token_budget in (1600, 2200):
+            for token_budget in token_budgets:
+                elapsed = time.monotonic() - started_at
+                remaining = total_timeout_seconds - elapsed
+                if remaining <= 0:
+                    provider_error = "Jarvis stopped the profile build because the provider took too long on the current model path."
+                    logger.warning(
+                        "Synthesis budget exhausted for %s after %.2fs.",
+                        req.client_name,
+                        elapsed,
+                    )
+                    return {"status": "error", "reason": provider_error}
+
                 request_payload = dict(data)
                 request_payload["model"] = candidate_model
                 request_payload["max_tokens"] = token_budget
-                response = await asyncio.to_thread(
-                    requests.post,
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json=request_payload,
-                    timeout=(10, 90),
+                request_timeout = (
+                    min(SYNTHESIS_CONNECT_TIMEOUT_SECONDS, 5.0) if quick_intake_only else SYNTHESIS_CONNECT_TIMEOUT_SECONDS,
+                    max(8.0, min(45.0 if quick_intake_only else SYNTHESIS_READ_TIMEOUT_SECONDS, remaining)),
                 )
+                try:
+                    response = await asyncio.to_thread(
+                        requests.post,
+                        f"{base_url}/chat/completions",
+                        headers=headers,
+                        json=request_payload,
+                        timeout=request_timeout,
+                    )
+                except requests.Timeout:
+                    provider_error = "Jarvis stopped the profile build because the provider took too long on the current model path."
+                    logger.warning(
+                        "Synthesis provider timeout for %s on %s at max_tokens=%s after %.2fs total elapsed.",
+                        req.client_name,
+                        candidate_model,
+                        token_budget,
+                        time.monotonic() - started_at,
+                    )
+                    continue
+                except requests.RequestException as request_exc:
+                    provider_error = f"Provider connection failed: {type(request_exc).__name__}"
+                    logger.warning(
+                        "Synthesis provider request failed for %s on %s at max_tokens=%s: %s",
+                        req.client_name,
+                        candidate_model,
+                        token_budget,
+                        request_exc,
+                    )
+                    continue
+
                 if response.status_code != 200:
                     provider_error = f"Provider rejected the request: {response.status_code}"
                     logger.error(f"LLM API Error ({candidate_model}): {response.text}")
@@ -3735,6 +4121,15 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
 
                 result = _normalize_synthesized_profile_result(parsed, synthesis_context)
                 profile_data = result.get("data") or {}
+                normalized_website = _normalize_public_source_url(req.website_url)
+                normalized_social = _normalize_public_source_url(req.social_url)
+                if normalized_website:
+                    profile_data["website_url"] = normalized_website
+                if normalized_social:
+                    profile_data["social_url"] = normalized_social
+                if isinstance(enrichments, dict) and enrichments.get("website_digest"):
+                    profile_data["website_digest"] = enrichments["website_digest"]
+                result["data"] = profile_data
                 missing_fields = validate_synthesized_profile(profile_data)
                 if missing_fields:
                     return {
@@ -3754,6 +4149,39 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
         logger.error(f"Failed to parse LLM JSON: {e}")
         return {"status": "error", "reason": "Failed to synthesize profile via AI. Check backend logs."}
 
+
+async def _background_build_client_trend_dossier(client_id: str) -> None:
+    safe_client_id = str(client_id or "").strip()
+    if not safe_client_id:
+        return
+    try:
+        logger.info("API | TREND DOSSIER | Background build queued for %s", safe_client_id)
+        result = await asyncio.to_thread(build_client_trend_dossier, safe_client_id)
+        if str((result or {}).get("status") or "").strip().lower() == "success":
+            logger.info(
+                "API | TREND DOSSIER | Background build completed for %s with %s recent signals",
+                safe_client_id,
+                result.get("total_recent_results") or result.get("source_count") or 0,
+            )
+        else:
+            logger.warning("API | TREND DOSSIER | Background build returned non-success for %s: %s", safe_client_id, result)
+    except Exception:
+        logger.exception("API | TREND DOSSIER | Background build failed for %s", safe_client_id)
+
+
+def _get_recent_client_captions(client_id: str, *, limit: int = 5, exclude_bundle_name: str | None = None) -> list[str]:
+    bundles = list_client_drafts(client_id).get("bundles", {})
+    entries: list[tuple[str, str]] = []
+    for bundle_name, payload in bundles.items():
+        if exclude_bundle_name and str(bundle_name).strip() == str(exclude_bundle_name).strip():
+            continue
+        if not isinstance(payload, dict):
+            continue
+        caption_text = str(payload.get("caption_text") or "").strip()
+        if caption_text:
+            entries.append((str(bundle_name).strip(), caption_text))
+    return [caption for _bundle, caption in entries[-limit:]][::-1]
+
 class ProfileSaveRequest(BaseModel):
     client_id: str
     phone_number: Optional[str] = None
@@ -3766,16 +4194,27 @@ class ProfileSaveRequest(BaseModel):
 @app.post("/api/save-client-profile")
 async def api_save_client_profile(req: ProfileSaveRequest):
     logger.info(f"API | SAVE | Writing profile for {req.client_id} to disk")
-    
-    missing_fields = validate_synthesized_profile(req.profile_json)
+
+    profile = dict(req.profile_json or {})
+    website_url = _normalize_public_source_url(profile.get("website_url"))
+    social_url = _normalize_public_source_url(profile.get("social_url"))
+    if website_url:
+        profile["website_url"] = website_url
+    if social_url:
+        profile["social_url"] = social_url
+    if website_url and not isinstance(profile.get("website_digest"), dict):
+        website_digest = extract_website_digest(website_url)
+        if isinstance(website_digest, dict) and str(website_digest.get("status") or "").strip() == "success":
+            profile["website_digest"] = website_digest
+
+    missing_fields = validate_synthesized_profile(profile)
     if missing_fields:
         return JSONResponse(status_code=400, content={"status": "missing", "missing_fields": missing_fields, "reason": "Client profile is missing critical brand intelligence."})
 
     full_data = req.model_dump(exclude_none=True)
+    full_data["profile_json"] = profile
     store = get_client_store()
-    store.save_client(req.client_id, full_data)
-        
-    profile = req.profile_json
+    saved_client = store.save_client(req.client_id, full_data)
     brand_data = build_brand_profile(req.client_id, profile)
     store.save_brand_profile(req.client_id, brand_data)
     
@@ -3787,8 +4226,14 @@ async def api_save_client_profile(req: ProfileSaveRequest):
         phone_map[req.phone_number] = req.client_id
         with open("phone_map.json", "w", encoding="utf-8") as f:
             json.dump(phone_map, f, indent=4)
+
+    asyncio.create_task(_background_build_client_trend_dossier(req.client_id))
         
-    return {"status": "success", "message": f"Client {req.client_id} securely registered. Brand profile persisted via {store.backend_name} backend."}
+    return {
+        "status": "success",
+        "message": f"Client {req.client_id} securely registered. Brand profile persisted via {store.backend_name} backend.",
+        "client": saved_client,
+    }
 
 def _ensure_instagram_compliant_image(file_bytes: bytearray, filename: str) -> tuple[bytes, str]:
     """
@@ -3855,10 +4300,11 @@ async def api_upload_image(client_id: str = Form(...), file: UploadFile = File(.
     
     final_bytes, final_filename = _ensure_instagram_compliant_image(file_bytes, filename)
     asset = save_uploaded_asset(client_id, final_filename, final_bytes)
+    asset_preview = _asset_preview_payload(client_id, asset)
     
     stored_name = str(asset.get("filename") or final_filename).strip()
     file_path = f"assets/{client_id}/{stored_name}"
-    return {"status": "success", "file_path": file_path, "asset": asset}
+    return {"status": "success", "file_path": file_path, "asset": asset_preview}
 
 @app.post("/api/upload-bulk")
 async def api_upload_bulk(client_id: str = Form(...), files: List[UploadFile] = File(...)):
@@ -3889,11 +4335,12 @@ async def api_upload_bulk(client_id: str = Form(...), files: List[UploadFile] = 
                     
             final_bytes, final_filename = _ensure_instagram_compliant_image(file_bytes, filename)
             asset = save_uploaded_asset(client_id, final_filename, final_bytes)
+            asset_preview = _asset_preview_payload(client_id, asset)
             
             stored_name = str(asset.get("filename") or final_filename).strip()
             file_path = f"assets/{client_id}/{stored_name}"
             uploaded_paths.append(file_path)
-            uploaded_assets.append(asset)
+            uploaded_assets.append(asset_preview)
     except InputValidationError as e:
         return JSONResponse(status_code=400, content={"status": "error", "reason": str(e)})
     except Exception as e:
@@ -3943,7 +4390,7 @@ async def api_update_client(client_id: str, req: ClientUpdateRequest):
         if missing_fields:
             return JSONResponse(status_code=400, content={"status": "missing", "missing_fields": missing_fields, "reason": "Client profile is missing critical brand intelligence."})
     
-    store.save_client(client_id, data)
+    saved_client = store.save_client(client_id, data)
     
     # Sync phone_map if phone changed
     if req.phone_number:
@@ -3952,7 +4399,7 @@ async def api_update_client(client_id: str, req: ClientUpdateRequest):
         with open("phone_map.json", "w", encoding="utf-8") as f:
             json.dump(phone_map, f, indent=4)
     
-    # If brand profile was updated, sync to brands/ for Caption Agent
+    # If brand profile was updated, sync to brands/ for the Caption Service
     if updates.get("profile_json_merged"):
         profile = data.get("profile_json", {})
         brand_data = build_brand_profile(client_id, profile)
@@ -3961,7 +4408,12 @@ async def api_update_client(client_id: str, req: ClientUpdateRequest):
     
     updated_keys = [k for k in req.model_dump(exclude_none=True).keys()]
     logger.info(f"API | UPDATE | Client {client_id} updated: {updated_keys}")
-    return {"status": "success", "message": f"Updated {updated_keys} for {client_id}", "updated_fields": updated_keys}
+    return {
+        "status": "success",
+        "message": f"Updated {updated_keys} for {client_id}",
+        "updated_fields": updated_keys,
+        "client": saved_client,
+    }
 
 
 @app.delete("/api/client/{client_id}")
@@ -3982,6 +4434,8 @@ async def api_delete_client(client_id: str):
         "schedule_jobs": 0,
         "pending_approvals": 0,
         "publish_runs": 0,
+        "strategy_plans": 0,
+        "drafts": 0,
         "reschedule_sessions": 0,
     }
 
@@ -3993,39 +4447,57 @@ async def api_delete_client(client_id: str):
         removed["profile"] = True
         removed["brand_profile"] = True
 
-        removed_asset_count = delete_all_client_assets(client_id)
-        if os.path.exists(vault_dir):
-            shutil.rmtree(vault_dir, ignore_errors=True)
-        removed["vault"] = removed_asset_count > 0 or not os.path.exists(vault_dir)
+        def _remove_vault_and_assets() -> bool:
+            removed_asset_count = delete_all_client_assets(client_id)
+            if os.path.exists(vault_dir):
+                shutil.rmtree(vault_dir, ignore_errors=True)
+            return removed_asset_count > 0 or not os.path.exists(vault_dir)
 
-        phone_map = load_phone_map()
-        filtered_map = {}
-        removed_phone_entries = 0
-        for phone, mapped_client in phone_map.items():
-            if mapped_client == client_id or (phone_number and phone == phone_number):
-                removed_phone_entries += 1
-                continue
-            filtered_map[phone] = mapped_client
-        removed["phone_map_entries"] = removed_phone_entries
-        with open("phone_map.json", "w", encoding="utf-8") as f:
-            json.dump(filtered_map, f, indent=4, ensure_ascii=False)
+        def _remove_phone_map_entries() -> int:
+            phone_map = load_phone_map()
+            filtered_map = {}
+            removed_phone_entries = 0
+            for phone, mapped_client in phone_map.items():
+                if mapped_client == client_id or (phone_number and phone == phone_number):
+                    removed_phone_entries += 1
+                    continue
+                filtered_map[phone] = mapped_client
+            with open("phone_map.json", "w", encoding="utf-8") as f:
+                json.dump(filtered_map, f, indent=4, ensure_ascii=False)
+            return removed_phone_entries
 
-        removed["schedule_jobs"] = delete_client_schedule_jobs(client_id)
-        removed["pending_approvals"] = delete_client_pending_approvals(client_id)
-        removed["publish_runs"] = delete_client_publish_runs(client_id)
-        delete_client_drafts(client_id)
+        def _remove_reschedule_sessions() -> int:
+            sessions = load_reschedule_sessions()
+            filtered_sessions = {}
+            removed_sessions = 0
+            for phone, session in sessions.items():
+                if str(session.get("client") or "") == client_id:
+                    removed_sessions += 1
+                    continue
+                filtered_sessions[phone] = session
+            if removed_sessions:
+                save_reschedule_sessions(filtered_sessions)
+            return removed_sessions
 
-        sessions = load_reschedule_sessions()
-        filtered_sessions = {}
-        removed_sessions = 0
-        for phone, session in sessions.items():
-            if str(session.get("client") or "") == client_id:
-                removed_sessions += 1
-                continue
-            filtered_sessions[phone] = session
-        removed["reschedule_sessions"] = removed_sessions
-        if removed_sessions:
-            save_reschedule_sessions(filtered_sessions)
+        (
+            removed["vault"],
+            removed["phone_map_entries"],
+            removed["schedule_jobs"],
+            removed["pending_approvals"],
+            removed["publish_runs"],
+            removed["strategy_plans"],
+            removed["drafts"],
+            removed["reschedule_sessions"],
+        ) = await asyncio.gather(
+            asyncio.to_thread(_remove_vault_and_assets),
+            asyncio.to_thread(_remove_phone_map_entries),
+            asyncio.to_thread(delete_client_schedule_jobs, client_id),
+            asyncio.to_thread(delete_client_pending_approvals, client_id),
+            asyncio.to_thread(delete_client_publish_runs, client_id),
+            asyncio.to_thread(delete_client_strategy_plans, client_id),
+            asyncio.to_thread(delete_client_drafts, client_id),
+            asyncio.to_thread(_remove_reschedule_sessions),
+        )
 
         logger.info(f"API | DELETE | Removed client {client_id}: {removed}")
         return {"status": "success", "removed": removed}
@@ -4088,6 +4560,7 @@ def get_instagram_asset_warning(client_id: str, filename: str, media_kind: str, 
 
 
 def _asset_preview_payload(client_id: str, asset: dict) -> dict:
+    store = get_asset_store()
     filename = str(asset.get("filename") or "").strip()
     media_kind = str(asset.get("kind") or detect_media_kind(filename)).strip().lower()
     metadata = asset.get("metadata") or {}
@@ -4096,6 +4569,25 @@ def _asset_preview_payload(client_id: str, asset: dict) -> dict:
     encoded_filename = "/".join(quote(part, safe="") for part in filename.split("/"))
     preview_path = f"/assets/{encoded_client}/{encoded_filename}"
     poster_path = f"{preview_path}.jpg" if has_poster else None
+    version_token = str(
+        metadata.get("preview_version")
+        or asset.get("updated_at")
+        or asset.get("created_at")
+        or asset.get("asset_id")
+        or int(time.time() * 1000)
+    ).strip()
+
+    def _with_version(url: str | None) -> str | None:
+        raw = str(url or "").strip()
+        if not raw:
+            return None
+        separator = "&" if "?" in raw else "?"
+        return f"{raw}{separator}v={quote(version_token, safe='')}"
+
+    full_url = _with_version(store.public_asset_url(client_id, filename)) or _with_version(preview_path)
+    poster_full_url = (_with_version(store.public_poster_url(client_id, filename)) or _with_version(poster_path)) if has_poster else None
+    thumb_url = _with_version(store.preview_asset_url(client_id, asset)) or full_url
+    poster_thumb_url = (_with_version(store.preview_poster_url(client_id, asset)) or poster_full_url) if has_poster else None
     is_valid_ig, warning = get_instagram_asset_warning(client_id, filename, media_kind, metadata)
     storage_available = bool(asset.get("storage_path") or filename)
     return {
@@ -4109,8 +4601,15 @@ def _asset_preview_payload(client_id: str, asset: dict) -> dict:
         "has_poster": has_poster,
         "width": int(metadata.get("width") or 0),
         "height": int(metadata.get("height") or 0),
-        "preview_url": preview_path,
-        "poster_url": poster_path,
+        "mime_type": str(metadata.get("mime_type") or ""),
+        "size_bytes": int(metadata.get("byte_size") or metadata.get("size_bytes") or 0),
+        "version_token": version_token,
+        "thumb_url": thumb_url,
+        "full_url": full_url,
+        "poster_thumb_url": poster_thumb_url,
+        "poster_full_url": poster_full_url,
+        "preview_url": thumb_url,
+        "poster_url": poster_thumb_url,
     }
 
 
@@ -4361,7 +4860,6 @@ async def api_create_bundle(client_id: str, req: BundleRequest):
         "status": "success",
         "message": f"Saved creative draft {req.bundle_name}",
         "draft": saved,
-        "bundles": list_client_drafts(client_id).get("bundles", {}),
     }
 
 @app.delete("/api/vault/{client_id}/bundles/{bundle_name}")
@@ -4402,7 +4900,13 @@ async def api_generate_draft_caption(client_id: str, bundle_name: str, req: Gene
     try:
         from caption_agent import generate_caption_payload
 
-        result = await asyncio.to_thread(generate_caption_payload, client_id, topic, media_type)
+        recent_captions = await asyncio.to_thread(
+            _get_recent_client_captions,
+            client_id,
+            limit=5,
+            exclude_bundle_name=bundle_name,
+        )
+        result = await asyncio.to_thread(generate_caption_payload, client_id, topic, media_type, recent_captions)
         if result.get("status") != "success":
             return JSONResponse(
                 status_code=400,
@@ -4643,10 +5147,23 @@ class JarvisBatchPlanRequest(BaseModel):
 class JarvisBatchRunRequest(BaseModel):
     plan: dict
 
+
+class StrategyPlanRequest(BaseModel):
+    client_id: str
+    window: str = "next_7_days"
+    goal: Optional[str] = None
+    campaign_context: Optional[str] = None
+
+
+class StrategyMaterializeRequest(BaseModel):
+    item_ids: Optional[List[str]] = None
+
+
 @app.post("/api/orchestrator-chat")
 async def api_orchestrator_chat(req: OrchestratorRequest):
     try:
         from orchestrator_agent import parse_multi_clause_release_request, run_orchestrator
+        from strategy_agent import prompt_requests_strategy
         draft_refs = []
         if req.draft_refs:
             for ref in req.draft_refs:
@@ -4663,7 +5180,8 @@ async def api_orchestrator_chat(req: OrchestratorRequest):
         if normalized_prompt != req.prompt:
             logger.info(f"API | ORCHESTRATOR | Normalized prompt for scheduling clarity: {normalized_prompt}")
 
-        parsed_release = parse_multi_clause_release_request(normalized_prompt, draft_refs)
+        is_strategy_request = prompt_requests_strategy(normalized_prompt)
+        parsed_release = None if is_strategy_request else parse_multi_clause_release_request(normalized_prompt, draft_refs)
         if parsed_release:
             parsed_tasks = list(parsed_release.get("tasks") or [])
             ready_tasks = [
@@ -4705,10 +5223,14 @@ async def api_orchestrator_chat(req: OrchestratorRequest):
                 payload["action"] = action
             if orchestrator_result.get("task_preview"):
                 payload["task_preview"] = orchestrator_result.get("task_preview")
+            if orchestrator_result.get("draft_refs"):
+                payload["draft_refs"] = orchestrator_result.get("draft_refs")
             if orchestrator_result.get("parser_warnings"):
                 payload["parser_warnings"] = orchestrator_result.get("parser_warnings")
             if orchestrator_result.get("requires_confirmation") is not None:
                 payload["requires_confirmation"] = bool(orchestrator_result.get("requires_confirmation"))
+            if orchestrator_result.get("strategy_plan"):
+                payload["strategy_plan"] = orchestrator_result.get("strategy_plan")
             return payload
         return {"status": "success", "reply": str(orchestrator_result or "")}
     except Exception as e:
@@ -4800,6 +5322,126 @@ async def api_orchestrator_run_status(run_id: str):
         raise HTTPException(status_code=404, detail="Mission Control run not found.")
     return {"status": "success", "run": run}
 
+
+@app.get("/api/strategy/plans")
+async def api_list_strategy_plans(client_id: str | None = None):
+    try:
+        plans = list_strategy_plans(client_id=str(client_id or "").strip() or None)
+        return {"status": "success", "plans": plans}
+    except Exception as exc:
+        logger.error("Strategy plan listing failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
+@app.delete("/api/strategy/plans")
+async def api_delete_strategy_plans(client_id: str):
+    try:
+        normalized_client = str(client_id or "").strip()
+        if not normalized_client:
+            return JSONResponse(status_code=400, content={"status": "error", "reason": "Client id is required."})
+        removed = delete_client_strategy_plans(normalized_client)
+        return {"status": "success", "removed": removed, "client_id": normalized_client}
+    except Exception as exc:
+        logger.error("Strategy client plan deletion failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
+@app.post("/api/strategy/plans")
+async def api_create_strategy_plan(req: StrategyPlanRequest, request: Request):
+    try:
+        from strategy_agent import run_strategy_agent
+
+        plan = await asyncio.to_thread(
+            run_strategy_agent,
+            req.client_id,
+            req.window,
+            str(req.goal or "").strip(),
+            str(req.campaign_context or "").strip(),
+            " ".join(part for part in [str(req.goal or "").strip(), str(req.campaign_context or "").strip()] if part),
+        )
+        if isinstance(plan, dict) and plan.get("error"):
+            return JSONResponse(status_code=400, content={"status": "error", "reason": str(plan.get("error") or "").strip()})
+        _audit_event(
+            "strategy.plan_created",
+            {
+                "plan_id": str(plan.get("plan_id") or "").strip(),
+                "client_id": str(plan.get("client_id") or "").strip(),
+                "window": str(plan.get("window") or "").strip(),
+                "item_count": len(plan.get("items") or []),
+            },
+            request=request,
+            actor=_get_rate_limit_identity(request),
+        )
+        return {"status": "success", "plan": plan}
+    except Exception as exc:
+        logger.error("Strategy plan creation failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
+@app.delete("/api/strategy/plans/{plan_id}")
+async def api_delete_strategy_plan(plan_id: str):
+    try:
+        normalized_plan = str(plan_id or "").strip()
+        if not normalized_plan:
+            return JSONResponse(status_code=400, content={"status": "error", "reason": "Plan id is required."})
+        removed = delete_strategy_plan(normalized_plan)
+        if not removed:
+            return JSONResponse(status_code=404, content={"status": "error", "reason": "Strategy plan not found."})
+        return {"status": "success", "removed": 1, "plan_id": normalized_plan}
+    except Exception as exc:
+        logger.error("Strategy plan deletion failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
+@app.post("/api/strategy/plans/{plan_id}/materialize")
+async def api_materialize_strategy_plan(plan_id: str, req: StrategyMaterializeRequest, request: Request):
+    try:
+        from strategy_agent import materialize_strategy_plan
+
+        existing = get_strategy_plan(str(plan_id).strip())
+        if not existing:
+            return JSONResponse(status_code=404, content={"status": "error", "reason": "Strategy plan not found."})
+        updated = await asyncio.to_thread(materialize_strategy_plan, str(plan_id).strip(), list(req.item_ids or []))
+        if isinstance(updated, dict) and updated.get("error"):
+            return JSONResponse(status_code=400, content={"status": "error", "reason": str(updated.get("error") or "").strip()})
+        _audit_event(
+            "strategy.plan_materialized",
+            {
+                "plan_id": str(updated.get("plan_id") or plan_id).strip(),
+                "client_id": str(updated.get("client_id") or "").strip(),
+                "item_count": len(updated.get("items") or []),
+            },
+            request=request,
+            actor=_get_rate_limit_identity(request),
+        )
+        return {"status": "success", "plan": updated}
+    except Exception as exc:
+        logger.error("Strategy plan materialization failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
+@app.get("/api/research/smoke")
+async def api_research_smoke(query: str, max_results: int = 5, recency_days: int = 30):
+    try:
+        pack = search_recent(query, max_results=max_results, recency_days=recency_days)
+        results = list(pack.get("results") or [])
+        published_dates = [str(item.get("published_at") or "").strip() for item in results if str(item.get("published_at") or "").strip()]
+        return {
+            "status": "success",
+            "provider": pack.get("provider") or "unavailable",
+            "recent_count": len(results),
+            "insufficient_recent_sources": bool(pack.get("insufficient_recent_sources")),
+            "date_range": {
+                "newest": max(published_dates) if published_dates else "",
+                "oldest": min(published_dates) if published_dates else "",
+            },
+            "pack": pack,
+        }
+    except Exception as exc:
+        logger.error("Research smoke failure: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"status": "error", "reason": str(exc)})
+
+
 @app.get("/api/stream-logs")
 async def stream_logs(request: Request):
     """
@@ -4844,6 +5486,17 @@ async def api_get_clients():
     return {"status": "success", "clients": clients}
 
 
+@app.get("/api/clients/full")
+async def api_get_clients_full():
+    """
+    Returns the full saved client payloads so the Clients workspace can hydrate
+    cards in one pass instead of making multiple per-client round trips.
+    """
+    store = get_client_store()
+    clients = store.list_clients()
+    return {"status": "success", "clients": clients}
+
+
 @app.get("/api/export-state")
 async def api_export_state():
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -4882,6 +5535,7 @@ async def api_export_state():
         "schedule": load_schedule("schedule.json"),
         "pending_approvals": list_live_pending_approvals(),
         "publish_runs": list_publish_runs(),
+        "strategy_plans": list_strategy_plans(),
         "reschedule_sessions": load_reschedule_sessions(),
         "clients": safe_clients,
         "brands": brands_payload,
@@ -4894,7 +5548,12 @@ async def api_export_state():
 
 @app.get("/api/agency/config")
 async def api_get_agency_config():
-    return get_agency_config()
+    config = dict(get_agency_config())
+    config["whatsapp_access_token"] = ""
+    config["whatsapp_access_token_configured"] = bool(str(os.getenv("WHATSAPP_TOKEN") or "").strip())
+    config["whatsapp_phone_id_configured"] = bool(str(os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID") or "").strip())
+    config["whatsapp_runtime_managed_by"] = "env"
+    return config
 
 class AgencyConfigRequest(BaseModel):
     owner_phone: str
@@ -4903,20 +5562,27 @@ class AgencyConfigRequest(BaseModel):
 
 @app.post("/api/agency/config")
 async def api_post_agency_config(req: AgencyConfigRequest):
-    current = get_agency_config()
     config = {
         "owner_phone": req.owner_phone.strip(),
-        "whatsapp_access_token": (req.whatsapp_access_token or "").strip(),
-        "whatsapp_phone_id": current.get("whatsapp_phone_id", "").strip(),
         "approval_routing": normalize_approval_routing_mode(req.approval_routing),
     }
     with open("agency_config.json", "w", encoding="utf-8") as f:
         json.dump(config, f, indent=4)
-    return {"status": "success"}
+    return {
+        "status": "success",
+        "detail": "Agency phone and approval routing saved. WhatsApp runtime secrets are managed through environment variables.",
+    }
 
 
 class ApprovalMoveRequest(BaseModel):
     release_window: str
+
+
+def _approval_requires_whatsapp_owner_lane(approval_id: str) -> bool:
+    job = get_pending_approval(approval_id)
+    if not job:
+        return False
+    return normalize_approval_routing_mode(job.get("approval_routing")) == "whatsapp_only"
 
 
 @app.get("/api/approvals/pending")
@@ -4939,6 +5605,12 @@ async def api_get_pending_approvals():
 
 @app.post("/api/approvals/{approval_id}/approve")
 async def api_approve_pending_approval(approval_id: str, request: Request):
+    if _approval_requires_whatsapp_owner_lane(approval_id):
+        return {
+            "status": "error",
+            "reason": "This approval is locked to the WhatsApp owner lane. The owner must approve it from WhatsApp before Jarvis schedules it.",
+            "code": "whatsapp_only_locked",
+        }
     result = approve_pending_approval(approval_id)
     _audit_event(
         "approval.approve",
@@ -4951,6 +5623,12 @@ async def api_approve_pending_approval(approval_id: str, request: Request):
 
 @app.post("/api/approvals/{approval_id}/reject")
 async def api_reject_pending_approval(approval_id: str, request: Request):
+    if _approval_requires_whatsapp_owner_lane(approval_id):
+        return {
+            "status": "error",
+            "reason": "This approval is locked to the WhatsApp owner lane. The owner must decline it from WhatsApp.",
+            "code": "whatsapp_only_locked",
+        }
     result = reject_pending_approval(approval_id)
     _audit_event(
         "approval.reject",
@@ -4975,6 +5653,12 @@ async def api_discard_all_pending_approvals(request: Request):
 
 @app.post("/api/approvals/{approval_id}/move")
 async def api_move_pending_approval(approval_id: str, req: ApprovalMoveRequest, request: Request):
+    if _approval_requires_whatsapp_owner_lane(approval_id):
+        return {
+            "status": "error",
+            "reason": "This approval is locked to the WhatsApp owner lane. The owner must change the release time from WhatsApp.",
+            "code": "whatsapp_only_locked",
+        }
     reopen_whatsapp = get_approval_routing_mode() in {"desktop_and_whatsapp", "whatsapp_only"}
     result = move_pending_approval(approval_id, req.release_window, reopen_whatsapp=reopen_whatsapp)
     _audit_event(

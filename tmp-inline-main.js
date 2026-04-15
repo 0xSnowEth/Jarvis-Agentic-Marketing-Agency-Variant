@@ -6886,7 +6886,10 @@ let currentCaptionDraftName = null;
 let currentCaptionStudioMode = 'manual';
 let currentCaptionStudioBaseline = '';
 let currentClientProfile = null;
+let currentClientProfileRequest = null;
 let currentClientValueBrief = null;
+let activeCaptionStudioRequestToken = 0;
+let currentCaptionStudioOpenMeta = null;
 let activeVaultAssetsRequestToken = 0;
 let activeVaultDraftsRequestToken = 0;
 
@@ -6965,9 +6968,15 @@ async function handleVaultUpload(source) {
 
 async function openVaultModal(clientId) {
     markClientWorkspaceInteraction(30000);
-    currentVaultClient = resolveWorkspaceClientId(clientId);
-    currentClientProfile = null;
+    const resolvedClientId = resolveWorkspaceClientId(clientId);
+    const previousVaultClient = currentVaultClient;
+    currentVaultClient = resolvedClientId;
+    if(previousVaultClient !== currentVaultClient && currentClientProfile?._clientId !== currentVaultClient) {
+        currentClientProfile = null;
+        currentClientProfileRequest = null;
+    }
     editingDraftName = null;
+    logCaptionStudioTiming('vault_modal_visible', performance.now(), { client: currentVaultClient });
 
     document.getElementById('modal-client-name').innerText = currentVaultClient + " Vault";
     document.getElementById('vault-modal').style.display = 'flex';
@@ -6994,6 +7003,7 @@ async function openVaultModal(clientId) {
 
     loadVaultAssetsData(!cachedAssets).catch(() => null);
     loadVaultDraftsData(!cachedDrafts).catch(() => null);
+    primeClientProfileForStudio(currentVaultClient);
 }
 
 
@@ -7105,23 +7115,23 @@ function renderVaultGrid(files) {
         const warningBadge = !isValid ? renderInstagramLimitBadge(warning) : '';
         const warningNote = !isValid ? renderInstagramLimitNote(warning, { subtle: true }) : '';
         
-        let discardBtn = `<button onclick="event.stopPropagation(); deleteVaultImage('${safeFile}')" style="position:absolute; top:4px; left:4px; background:rgba(0,0,0,0.6); color:#fff; border:none; width:22px; height:22px; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:14px; z-index:10; backdrop-filter:blur(2px); transition:all 0.2s; box-shadow:0 2px 4px rgba(0,0,0,0.5); line-height:1;" onmouseover="this.style.background='var(--red)'" onmouseout="this.style.background='rgba(0,0,0,0.6)'" title="Delete Media">×</button>`;
+        let discardBtn = `<button onclick="event.stopPropagation(); deleteVaultImage('${safeFile}')" class="vault-media-delete-btn" title="Delete Media">×</button>`;
         let repairBtn = '';
         if(canRepairMeta) {
-            repairBtn = `<button onclick="event.stopPropagation(); repairVaultVideoForMeta('${safeFile}')" style="position:absolute; top:4px; left:32px; background:rgba(232,155,26,0.92); color:#101010; border:none; height:22px; border-radius:999px; display:flex; align-items:center; justify-content:center; cursor:pointer; font-size:9px; font-weight:800; z-index:10; backdrop-filter:blur(2px); transition:all 0.2s; box-shadow:0 2px 4px rgba(0,0,0,0.5); line-height:1; padding:0 8px; letter-spacing:0.06em;" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='none'" title="Repair this video for Meta">REPAIR</button>`;
+            repairBtn = `<button onclick="event.stopPropagation(); repairVaultVideoForMeta('${safeFile}')" class="vault-media-repair-btn" title="Repair this video for Meta">Repair</button>`;
         }
         
         const kindBadge = kind === 'video'
-            ? `<div style="position:absolute; bottom:6px; right:6px; background:rgba(47,168,224,0.9); color:#fff; font-size:9px; font-weight:800; padding:3px 6px; border-radius:999px; z-index:10; letter-spacing:0.4px;">VIDEO</div>`
+            ? `<div class="vault-media-kind-badge">Video</div>`
             : '';
         const fileLabel = `<div class="v-item-title">${escapeHtml(f)}</div>`;
-        const fallback = `<div class="vault-preview-fallback" style="display:none; width:100%; height:100%; align-items:center; justify-content:center; text-align:center; padding:16px; color:var(--t3); font-size:11px; font-family:'Space Mono'; background:rgba(255,255,255,.03);">Preview unavailable</div>`;
+        const fallback = `<div class="vault-preview-fallback" style="display:none;">Preview unavailable</div>`;
         const skeleton = `<div class="vault-media-skeleton"></div>`;
         const sharedImgAttrs = `loading="${index < 4 ? 'eager' : 'lazy'}" decoding="async" fetchpriority="${index < 2 ? 'high' : 'auto'}" width="240" height="240" onload="const tile=this.closest('.v-item'); if(tile) tile.classList.add('is-loaded');" onerror="this.style.display='none'; const media=this.closest('.v-item-media'); const fb=media && media.querySelector('.vault-preview-fallback'); if(fb) fb.style.display='flex'; if(media) media.parentElement.classList.add('is-loaded');"`;
         const mediaPreview = kind === 'video'
             ? (posterUrl
                 ? `<img src="${posterUrl}" alt="${escapeHtml(f)}" ${sharedImgAttrs} style="${!isValid ? 'border:1px solid var(--red)' : ''}" />${fallback}`
-                : `<div style="width:100%; height:100%; display:flex; align-items:center; justify-content:center; text-align:center; padding:18px; color:var(--t2); font-size:11px; font-family:'Space Mono'; background:linear-gradient(180deg, rgba(15,18,28,.92), rgba(5,7,12,.98)); ${!isValid ? 'border:1px solid var(--red);' : ''}">Video ready</div>`)
+                : `<div class="vault-video-preview-fallback" style="${!isValid ? 'border:1px solid var(--red);' : ''}">Video ready</div>`)
             : `<img src="${previewUrl}" alt="${escapeHtml(f)}" ${sharedImgAttrs} style="${!isValid ? 'border:1px solid var(--red)' : ''}" />${fallback}`;
         div.innerHTML = `
             ${discardBtn}
@@ -7423,64 +7433,118 @@ function normalizeHashtagListInput(value) {
     return normalized;
 }
 
-async function loadClientProfileForStudio() {
-    if(currentClientProfile && currentClientProfile._clientId === currentVaultClient) {
+async function loadClientProfileForStudio(clientId = currentVaultClient) {
+    const resolvedClientId = resolveWorkspaceClientId(clientId || currentVaultClient);
+    if(!resolvedClientId) return { _clientId: '', profile_json: {} };
+    if(currentClientProfile && currentClientProfile._clientId === resolvedClientId && !currentClientProfile._isFallback) {
         return currentClientProfile;
     }
-    try {
-        const res = await fetch(buildApiUrl(`/api/client/${encodeURIComponent(currentVaultClient)}`));
-        const data = await res.json();
-        if(data && !data.reason) {
-            currentClientProfile = {
-                ...data,
-                _clientId: currentVaultClient
-            };
-            return currentClientProfile;
-        }
-    } catch(e) {}
-    currentClientProfile = {_clientId: currentVaultClient};
-    return currentClientProfile;
+    const cachedWorkspaceProfile = clientWorkspaceDataCache[resolvedClientId];
+    if(cachedWorkspaceProfile) {
+        currentClientProfile = {
+            ...cachedWorkspaceProfile,
+            _clientId: resolvedClientId,
+            _isFallback: false,
+        };
+        return currentClientProfile;
+    }
+    if(currentClientProfileRequest && currentClientProfileRequest.clientId === resolvedClientId) {
+        return currentClientProfileRequest.promise;
+    }
+    const promise = (async () => {
+        try {
+            const res = await fetch(buildApiUrl(`/api/client/${encodeURIComponent(resolvedClientId)}`));
+            const data = await res.json();
+            if(data && !data.reason) {
+                const payload = {
+                    ...data,
+                    _clientId: resolvedClientId,
+                    _isFallback: false,
+                };
+                currentClientProfile = payload;
+                upsertClientWorkspaceData({ ...data, client_id: resolvedClientId });
+                return payload;
+            }
+        } catch(e) {}
+        const fallback = { _clientId: resolvedClientId, profile_json: {}, _isFallback: true };
+        currentClientProfile = fallback;
+        return fallback;
+    })().finally(() => {
+        if(currentClientProfileRequest?.clientId === resolvedClientId) currentClientProfileRequest = null;
+    });
+    currentClientProfileRequest = { clientId: resolvedClientId, promise };
+    return promise;
 }
 
-async function openCaptionStudio(bundleName) {
-    const bundle = currentVaultBundles[bundleName];
-    if(!bundle) return;
-    currentCaptionDraftName = bundleName;
-    currentCaptionStudioMode = String(bundle.caption_mode || 'ai');
-    currentCaptionStudioBaseline = String(bundle.caption_text || '');
+function primeClientProfileForStudio(clientId) {
+    loadClientProfileForStudio(clientId).catch(() => null);
+}
 
-    const profile = await loadClientProfileForStudio();
+function logCaptionStudioTiming(stage, startedAt, meta = {}) {
+    try {
+        const duration = Number((performance.now() - startedAt).toFixed(1));
+        const payload = { stage, duration_ms: duration, ...meta };
+        window.__jarvisUiTimings = Array.isArray(window.__jarvisUiTimings) ? window.__jarvisUiTimings : [];
+        window.__jarvisUiTimings.push(payload);
+        if(window.__jarvisUiTimings.length > 60) window.__jarvisUiTimings.shift();
+        console.debug('[JarvisTiming]', payload);
+    } catch(e) {}
+}
+
+function getCaptionStudioProfileSnapshot(profile) {
     const profileJson = profile?.profile_json || {};
     const brandVoice = profileJson.brand_voice || {};
-    const toneSummary = Array.isArray(brandVoice.tone) ? brandVoice.tone.join(', ') : (brandVoice.tone || (Array.isArray(profileJson.tone) ? profileJson.tone.join(', ') : (profileJson.tone || '')));
+    const toneSummary = Array.isArray(brandVoice.tone)
+        ? brandVoice.tone.join(', ')
+        : (brandVoice.tone || (Array.isArray(profileJson.tone) ? profileJson.tone.join(', ') : (profileJson.tone || '')));
     const voiceStyle = brandVoice.style || profileJson.style || '';
-    const voiceSummary = [toneSummary, voiceStyle].filter(Boolean).join(' | ') || 'Voice profile incomplete';
+    const voiceSummary = [toneSummary, voiceStyle].filter(Boolean).join(' | ') || 'Voice profile still needs detail';
     const identity = profileJson.identity || 'Add a short brand identity summary in Client Config so Jarvis writes like this business, not a generic page.';
     const seoBank = Array.isArray(profileJson.seo_keywords) ? profileJson.seo_keywords.slice(0, 5).join(' | ') : '';
     const rules = Array.isArray(profileJson.dos_and_donts) ? profileJson.dos_and_donts.slice(0, 3) : [];
     const examples = Array.isArray(profileJson.brand_voice_examples) ? profileJson.brand_voice_examples.slice(0, 2) : [];
     const dos = [...rules, ...examples].join(' | ');
-    const audience = profileJson.target_audience ? `Audience: ${profileJson.target_audience}` : 'Audience: add the ideal buyer in Client Config';
+    const audience = profileJson.target_audience || 'Add the ideal buyer in Client Config so Jarvis writes to the right audience.';
+    return {
+        profileJson,
+        voiceSummary,
+        identity,
+        seoBank: seoBank || 'Add 3-10 search phrases in Client Config so Jarvis can anchor the copy around real keywords.',
+        dos: dos || 'Add 3-5 brand voice examples plus copy rules in Client Config so Jarvis can match the voice more precisely.',
+        audience,
+    };
+}
 
-    document.getElementById('caption-studio-title').innerText = `${currentVaultClient.replace(/[_-]/g, ' ')} | Copy Studio`;
-    document.getElementById('caption-studio-subtitle').innerText = `Define what ${bundleName} should push, highlight, or sell before Jarvis moves it into approval.`;
-    document.getElementById('caption-studio-draft-name').innerText = bundleName;
-    document.getElementById('caption-studio-media-type').innerText = getReadableMediaType(bundle.bundle_type || 'image_single');
-    const status = getCopyStatus(bundle);
-    const statusNode = document.getElementById('caption-studio-status');
-    statusNode.innerText = status.label;
-    statusNode.style.color = status.color;
-    document.getElementById('caption-studio-voice').innerText = voiceSummary;
-    document.getElementById('caption-studio-audience').innerText = audience;
-    document.getElementById('caption-studio-identity').innerText = identity;
-    document.getElementById('caption-studio-seo-bank').innerText = seoBank || 'Add 3-10 search phrases in Client Config so Jarvis can anchor the copy around real keywords.';
-    document.getElementById('caption-studio-guidance').innerText = dos || 'Add 3-5 brand voice examples plus copy rules in Client Config so Jarvis can match the voice more precisely.';
+function renderCaptionStudioAssetStrip(bundle) {
+    const strip = document.getElementById('caption-studio-asset-strip');
+    if(!strip) return;
+    const files = Array.isArray(bundle?.files) ? bundle.files.slice(0, 4) : [];
+    if(!files.length) {
+        strip.innerHTML = `<div class="caption-studio-asset-fallback" style="width:100%; max-width:160px;">No media yet</div>`;
+        return;
+    }
+    strip.innerHTML = files.map((fileName, index) => {
+        const fileMeta = currentVaultFiles.find(item => (typeof item === 'string' ? item : item?.filename) === fileName) || fileName;
+        const kind = typeof fileMeta === 'string' ? 'image' : (fileMeta?.kind || 'image');
+        const thumbUrl = kind === 'video'
+            ? getVaultAssetPosterUrl(currentVaultClient, fileMeta)
+            : getVaultAssetPreviewUrl(currentVaultClient, fileMeta);
+        if(thumbUrl) {
+            return `<div class="caption-studio-asset-thumb"><img src="${thumbUrl}" alt="${escapeHtml(fileName)}" loading="${index < 2 ? 'eager' : 'lazy'}" decoding="async" /></div>`;
+        }
+        return `<div class="caption-studio-asset-fallback">${kind === 'video' ? 'Video' : 'Preview'}</div>`;
+    }).join('');
+}
+
+function bindCaptionStudioInputs(bundleName, bundle) {
     const topicInput = document.getElementById('caption-studio-topic');
     const seoInput = document.getElementById('caption-studio-seo');
     const hashtagsInput = document.getElementById('caption-studio-hashtags');
     const textarea = document.getElementById('caption-studio-text');
-    const suggestedAngle = buildSuggestedCampaignAngle(bundleName, bundle, profileJson);
-    topicInput.value = isGenericDraftTopic(bundleName, bundle.topic_hint) ? suggestedAngle : (bundle.topic_hint || '');
+    const initialSuggestedAngle = buildSuggestedCampaignAngle(bundleName, bundle, {});
+    topicInput.dataset.seedMode = isGenericDraftTopic(bundleName, bundle.topic_hint) ? 'generic' : 'custom';
+    topicInput.dataset.lastSuggestedAngle = initialSuggestedAngle;
+    topicInput.value = topicInput.dataset.seedMode === 'generic' ? initialSuggestedAngle : (bundle.topic_hint || '');
     seoInput.value = bundle.seo_keyword_used || '';
     hashtagsInput.value = normalizeHashtagListInput(Array.isArray(bundle.hashtags) ? bundle.hashtags : []).join(', ');
     textarea.value = bundle.caption_text || '';
@@ -7491,18 +7555,138 @@ async function openCaptionStudio(bundleName) {
         else if(!currentCaptionStudioBaseline) currentCaptionStudioMode = 'manual';
         refreshCaptionStudioPreview();
     };
-    topicInput.oninput = refreshCaptionStudioPreview;
+    topicInput.oninput = () => {
+        topicInput.dataset.seedMode = 'custom';
+        refreshCaptionStudioPreview();
+    };
     seoInput.oninput = refreshCaptionStudioPreview;
     hashtagsInput.oninput = refreshCaptionStudioPreview;
     hashtagsInput.onblur = () => {
         hashtagsInput.value = normalizeHashtagListInput(hashtagsInput.value).join(', ');
         refreshCaptionStudioPreview();
     };
+}
+
+function renderCaptionStudioLoadingState(bundleName, bundle) {
+    const shell = document.getElementById('caption-studio-shell');
+    const statusNode = document.getElementById('caption-studio-status');
+    const voiceNode = document.getElementById('caption-studio-voice');
+    const briefStatusNode = document.getElementById('caption-studio-brief-status');
+    const audienceNode = document.getElementById('caption-studio-audience');
+    const identityNode = document.getElementById('caption-studio-identity');
+    const seoBankNode = document.getElementById('caption-studio-seo-bank');
+    const guidanceNode = document.getElementById('caption-studio-guidance');
+    const topicInput = document.getElementById('caption-studio-topic');
+
+    if(shell) shell.classList.add('is-hydrating');
+    document.getElementById('caption-studio-title').innerText = `${currentVaultClient.replace(/[_-]/g, ' ')} | Copy Studio`;
+    document.getElementById('caption-studio-subtitle').innerText = `Define what ${bundleName} should push, highlight, or sell before Jarvis moves it into approval.`;
+    document.getElementById('caption-studio-draft-name').innerText = bundleName;
+    document.getElementById('caption-studio-media-type').innerText = getReadableMediaType(bundle.bundle_type || 'image_single');
+    const status = getCopyStatus(bundle);
+    statusNode.innerText = status.label;
+    statusNode.style.color = status.color;
+    voiceNode.innerText = 'Loading client voice...';
+    audienceNode.innerText = 'Loading audience...';
+    identityNode.innerText = 'Jarvis is reading the saved client profile so the copy stays on-brand.';
+    seoBankNode.innerText = 'Loading SEO anchors...';
+    guidanceNode.innerText = 'Loading do / avoid rules...';
+    if(briefStatusNode) {
+        briefStatusNode.className = 'caption-studio-brief-status is-loading';
+        briefStatusNode.innerText = 'Loading brand brief...';
+    }
+    if(topicInput) topicInput.dataset.seedMode = topicInput.dataset.seedMode || 'generic';
+    renderCaptionStudioAssetStrip(bundle);
+}
+
+function renderCaptionStudioProfileState(profile, bundleName, bundle, options = {}) {
+    const shell = document.getElementById('caption-studio-shell');
+    const snapshot = getCaptionStudioProfileSnapshot(profile);
+    const topicInput = document.getElementById('caption-studio-topic');
+    const voiceNode = document.getElementById('caption-studio-voice');
+    const audienceNode = document.getElementById('caption-studio-audience');
+    const identityNode = document.getElementById('caption-studio-identity');
+    const seoBankNode = document.getElementById('caption-studio-seo-bank');
+    const guidanceNode = document.getElementById('caption-studio-guidance');
+    const briefStatusNode = document.getElementById('caption-studio-brief-status');
+    const suggestedAngle = buildSuggestedCampaignAngle(bundleName, bundle, snapshot.profileJson);
+
+    if(shell) shell.classList.remove('is-hydrating');
+    voiceNode.innerText = snapshot.voiceSummary;
+    audienceNode.innerText = snapshot.audience;
+    identityNode.innerText = snapshot.identity;
+    seoBankNode.innerText = snapshot.seoBank;
+    guidanceNode.innerText = snapshot.dos;
+    if(briefStatusNode) {
+        briefStatusNode.className = `caption-studio-brief-status ${options.fallback ? 'is-fallback' : 'is-ready'}`;
+        briefStatusNode.innerText = options.fallback
+            ? 'Profile partially unavailable. You can still write and save the copy.'
+            : 'Brand brief ready';
+    }
+    if(topicInput) {
+        const currentValue = topicInput.value.trim();
+        const lastSuggestion = String(topicInput.dataset.lastSuggestedAngle || '').trim();
+        const canSwapSuggestion = topicInput.dataset.seedMode === 'generic' && (!currentValue || currentValue === lastSuggestion);
+        topicInput.dataset.lastSuggestedAngle = suggestedAngle;
+        if(canSwapSuggestion) topicInput.value = suggestedAngle;
+    }
+    refreshCaptionStudioPreview();
+}
+
+async function hydrateCaptionStudioProfile(bundleName, requestToken) {
+    const bundle = currentVaultBundles[bundleName];
+    if(!bundle) return;
+    try {
+        const profile = await loadClientProfileForStudio(currentVaultClient);
+        if(requestToken !== activeCaptionStudioRequestToken || currentCaptionDraftName !== bundleName) return;
+        renderCaptionStudioProfileState(profile, bundleName, bundle);
+        if(currentCaptionStudioOpenMeta?.requestToken === requestToken) {
+            logCaptionStudioTiming('copy_studio_profile_ready', currentCaptionStudioOpenMeta.startedAt, {
+                client: currentVaultClient,
+                draft: bundleName,
+            });
+        }
+    } catch(e) {
+        if(requestToken !== activeCaptionStudioRequestToken || currentCaptionDraftName !== bundleName) return;
+        renderCaptionStudioProfileState({ _clientId: currentVaultClient, profile_json: {} }, bundleName, bundle, { fallback: true });
+    }
+}
+
+async function openCaptionStudio(bundleName, triggerButton = null) {
+    const bundle = currentVaultBundles[bundleName];
+    if(!bundle) return;
+    const startedAt = performance.now();
+    setButtonBusy(triggerButton, 'Opening Studio...');
+    currentCaptionDraftName = bundleName;
+    currentCaptionStudioMode = String(bundle.caption_mode || 'ai');
+    currentCaptionStudioBaseline = String(bundle.caption_text || '');
+    const requestToken = ++activeCaptionStudioRequestToken;
+    currentCaptionStudioOpenMeta = {
+        requestToken,
+        startedAt,
+        client: currentVaultClient,
+        draft: bundleName,
+    };
+
+    bindCaptionStudioInputs(bundleName, bundle);
+    renderCaptionStudioLoadingState(bundleName, bundle);
     refreshCaptionStudioPreview();
     document.getElementById('caption-studio-modal').style.display = 'flex';
+    window.requestAnimationFrame(() => {
+        restoreButtonBusy(triggerButton);
+        logCaptionStudioTiming('copy_studio_visible', startedAt, {
+            client: currentVaultClient,
+            draft: bundleName,
+        });
+    });
+    hydrateCaptionStudioProfile(bundleName, requestToken).catch(() => null);
 }
 
 function closeCaptionStudio() {
+    activeCaptionStudioRequestToken += 1;
+    currentCaptionStudioOpenMeta = null;
+    const shell = document.getElementById('caption-studio-shell');
+    if(shell) shell.classList.remove('is-hydrating');
     document.getElementById('caption-studio-modal').style.display = 'none';
     currentCaptionDraftName = null;
     currentCaptionStudioBaseline = '';
@@ -7512,6 +7696,7 @@ function closeCaptionStudio() {
 /* #SECTION: Caption Studio */
 async function generateDraftCaption(button) {
     if(!currentCaptionDraftName) return;
+    const startedAt = performance.now();
     const topic = document.getElementById('caption-studio-topic').value.trim();
     setButtonBusy(button, 'Jarvis is drafting...');
     try {
@@ -7535,6 +7720,10 @@ async function generateDraftCaption(button) {
     } catch(e) {
         showNotification('Caption Failed', 'Connection failed while generating the draft caption.', true);
     } finally {
+        logCaptionStudioTiming('caption_generate', startedAt, {
+            client: currentVaultClient,
+            draft: currentCaptionDraftName || '',
+        });
         restoreButtonBusy(button);
     }
 }
@@ -7560,6 +7749,7 @@ function renderVaultFetchFailure(clientId, message = '', options = {}) {
 
 async function saveDraftCaption(closeAfterSave = false, button = null) {
     if(!currentCaptionDraftName) return;
+    const startedAt = performance.now();
     const draftName = currentCaptionDraftName;
     const textarea = document.getElementById('caption-studio-text');
     const topicInput = document.getElementById('caption-studio-topic');
@@ -7621,6 +7811,11 @@ async function saveDraftCaption(closeAfterSave = false, button = null) {
     } catch(e) {
         showNotification('Save Failed', 'Connection failed while saving the caption.', true);
     } finally {
+        logCaptionStudioTiming('caption_save', startedAt, {
+            client: currentVaultClient,
+            draft: draftName,
+            action: closeAfterSave ? 'save_return' : 'save_stay',
+        });
         restoreButtonBusy(button);
     }
 }
@@ -7721,37 +7916,45 @@ function renderVaultBundles() {
             ? `
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                     <input id="draft-rename-${encodedName}" class="qin" value="${escapeHtml(bName)}" style="max-width:260px; margin:0; height:34px;" />
-                    <button onclick="saveDraftRename('${safeName}', this)" style="background:rgba(31,206,160,.12); border:1px solid rgba(31,206,160,.28); color:var(--solid-green); padding:6px 12px; font-size:11px; font-weight:700; border-radius:8px; cursor:pointer; font-family:'Space Mono';">Save</button>
-                    <button onclick="cancelDraftRename()" style="background:transparent; border:1px solid rgba(255,255,255,.08); color:var(--t3); padding:6px 12px; font-size:11px; font-weight:700; border-radius:8px; cursor:pointer; font-family:'Space Mono';">Cancel</button>
+                    <button onclick="saveDraftRename('${safeName}', this)" class="bundle-rename-save">Save</button>
+                    <button onclick="cancelDraftRename()" class="bundle-rename-cancel">Cancel</button>
                 </div>`
             : `
                 <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                    <span style="color:var(--t1); font-weight:600; font-size:15px;">${escapeHtml(bName)}</span>
-                    <button onclick="startDraftRename('${safeName}')" style="background:transparent; border:1px solid rgba(255,255,255,.08); color:var(--t3); padding:4px 8px; font-size:10px; font-weight:700; border-radius:999px; cursor:pointer; font-family:'Space Mono';">Rename</button>
+                    <span class="bundle-card-title">${escapeHtml(bName)}</span>
+                    <button onclick="startDraftRename('${safeName}')" class="bundle-rename-btn">Rename</button>
                 </div>`;
+        const statusToneClass = status.label === 'Jarvis Draft Ready'
+            ? 'is-ready'
+            : (status.label === 'No Copy Yet' ? 'is-empty' : 'is-warning');
         const card = document.createElement('div');
         card.className = 'bundle-card';
         card.innerHTML = `
-            <div>
-                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
-                    ${nameMarkup}
-                    <span style="background:rgba(139,108,247,.15); color:var(--purple); font-size:10px; padding:2px 8px; border-radius:12px; font-weight:700;">${bundleType === 'video' ? 'REEL' : files.length > 1 ? 'CAROUSEL' : 'IMAGE POST'}</span>
-                    <span style="background:rgba(255,255,255,.04); color:${status.color}; font-size:10px; padding:2px 8px; border-radius:12px; font-weight:700;">${status.label}</span>
+            <div class="bundle-card-main">
+                <div class="bundle-card-head">
+                    <div class="bundle-card-copy">
+                        <div class="bundle-card-kicker">Creative Draft</div>
+                        <div class="bundle-card-title-row">${nameMarkup}</div>
+                    </div>
+                    <div class="bundle-card-pills">
+                        <span class="bundle-card-pill is-type">${bundleType === 'video' ? 'Reel' : files.length > 1 ? 'Carousel' : 'Image Post'}</span>
+                        <span class="bundle-card-pill ${statusToneClass}" style="color:${status.color};">${status.label}</span>
+                    </div>
                 </div>
                 <div class="b-imgs">${imgsHtml}</div>
-                <div style="margin-top:14px; padding:14px; border-radius:12px; border:1px solid rgba(255,255,255,.05); background:rgba(255,255,255,.02);">
-                    <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
-                        <div style="font-size:12px; font-weight:700; color:var(--t2); text-transform:uppercase; letter-spacing:.6px;">Copy Snapshot</div>
-                        <div style="font-size:11px; color:var(--t4);">Open JARVIS Copywriter to generate or refine the final caption.</div>
+                <div class="bundle-card-preview">
+                    <div class="bundle-card-preview-head">
+                        <div class="bundle-card-preview-title">Copy Snapshot</div>
+                        <div class="bundle-card-preview-copy">Open Copy Studio to draft, refine, or lock the final caption.</div>
                     </div>
-                <div style="font-size:13px; color:var(--t3); line-height:1.7; margin-bottom:12px;">${escapeHtml(captionPreview)}</div>
-                <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                        <button onclick="openCaptionStudio('${safeName}')" style="background:rgba(47,168,224,.12); border:1px solid rgba(47,168,224,.25); color:var(--blue); padding:8px 12px; font-size:11px; font-weight:700; border-radius:8px; cursor:pointer; font-family:'Space Mono';">Open Copy Studio</button>
-                        <button onclick="addDraftToJarvisFromVault('${safeName}')" style="background:rgba(139,108,247,.12); border:1px solid rgba(139,108,247,.22); color:var(--purple); padding:8px 12px; font-size:11px; font-weight:700; border-radius:8px; cursor:pointer; font-family:'Space Mono';">Add To Jarvis</button>
+                    <div class="bundle-card-preview-body">${escapeHtml(captionPreview)}</div>
+                    <div class="bundle-card-actions">
+                        <button onclick="openCaptionStudio('${safeName}', this)" class="bundle-card-btn bundle-card-btn-primary">Open Copy Studio</button>
+                        <button onclick="addDraftToJarvisFromVault('${safeName}')" class="bundle-card-btn bundle-card-btn-secondary">Load Into Workspace</button>
                     </div>
                 </div>
             </div>
-            <button onclick="deleteBundle('${safeName}')" style="background:rgba(224,85,85,.1); border:1px solid rgba(224,85,85,.2); color:#e05555; padding:6px 16px; font-size:12px; font-weight:600; border-radius:8px; cursor:pointer; transition:all .2s;" onmouseover="this.style.background='rgba(224,85,85,.2)'" onmouseout="this.style.background='rgba(224,85,85,.1)'">Remove Draft</button>
+            <button onclick="deleteBundle('${safeName}')" class="bundle-card-btn bundle-card-btn-danger">Remove Draft</button>
         `;
         list.appendChild(card);
     });

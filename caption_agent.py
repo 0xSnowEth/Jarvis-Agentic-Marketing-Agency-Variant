@@ -7,8 +7,10 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from caption_quality_gate import score_caption_quality
 from client_store import get_client_store
 from queue_store import normalize_hashtag_list
+from trend_research_service import get_client_trend_dossier
 
 load_dotenv()
 
@@ -126,7 +128,7 @@ def normalize_caption_payload(output: dict) -> dict:
         caption = caption.strip(" \n-")
 
     payload["caption"] = caption.strip()
-    payload["hashtags"] = merged
+    payload["hashtags"] = merged[:7]
     payload["seo_keyword_used"] = str(payload.get("seo_keyword_used") or "").strip()
     payload["status"] = str(payload.get("status") or "success").strip() or "success"
     return payload
@@ -154,58 +156,153 @@ def _compact_caption_profile(brand_data: dict[str, Any]) -> dict[str, Any]:
     services = data.get("services") or []
     if not isinstance(services, list):
         services = []
+    website_digest = data.get("website_digest") or {}
+    if not isinstance(website_digest, dict):
+        website_digest = {}
+    trend_dossier = data.get("trend_dossier") or {}
+    if not isinstance(trend_dossier, dict):
+        trend_dossier = {}
+    raw_source_links = trend_dossier.get("source_link_details") or trend_dossier.get("source_links") or []
+    normalized_source_links = []
+    if isinstance(raw_source_links, list):
+        for item in raw_source_links[:8]:
+            if isinstance(item, dict):
+                url = str(item.get("url") or "").strip()
+                if not url:
+                    continue
+                normalized_source_links.append(
+                    {
+                        "title": str(item.get("title") or item.get("label") or "Source").strip(),
+                        "url": url,
+                        "published_at": str(item.get("published_at") or "").strip(),
+                    }
+                )
+            else:
+                url = str(item or "").strip()
+                if url:
+                    normalized_source_links.append({"title": "Source", "url": url, "published_at": ""})
     return {
         "business_name": str(data.get("business_name") or data.get("client_name") or "").strip(),
         "industry": str(data.get("industry") or "general").strip(),
+        "main_language": str(data.get("main_language") or "").strip(),
+        "city_market": str(data.get("city_market") or data.get("market") or data.get("location") or "").strip(),
         "audience_summary": str(data.get("target_audience") or "").strip(),
         "offer_summary": ", ".join(str(item).strip() for item in services[:6] if str(item).strip()),
         "voice_rules": rules,
         "do_avoid_rules": [str(item).strip() for item in (data.get("dos_and_donts") or [])[:8] if str(item).strip()],
         "seo_keywords": [str(item).strip() for item in (data.get("seo_keywords") or [])[:8] if str(item).strip()],
         "language_profile": data.get("language_profile") or {},
+        "website_digest": {
+            "title": str(website_digest.get("title") or "").strip(),
+            "meta_description": str(website_digest.get("meta_description") or "").strip(),
+            "headings": [str(item).strip() for item in (website_digest.get("headings") or [])[:8] if str(item).strip()],
+            "service_terms": [str(item).strip() for item in (website_digest.get("service_terms") or [])[:8] if str(item).strip()],
+            "brand_keywords": [str(item).strip() for item in (website_digest.get("brand_keywords") or [])[:8] if str(item).strip()],
+        },
+        "trend_dossier": {
+            "status": str(trend_dossier.get("status") or "").strip(),
+            "provider": str(trend_dossier.get("provider") or "").strip(),
+            "recency_days": trend_dossier.get("recency_days") or 30,
+            "source_coverage": str(trend_dossier.get("source_coverage") or "").strip(),
+            "recent_signals": [str(item).strip() for item in (trend_dossier.get("recent_signals") or [])[:12] if str(item).strip()],
+            "trend_angles": trend_dossier.get("trend_angles") if isinstance(trend_dossier.get("trend_angles"), list) else [],
+            "hook_patterns": [str(item).strip() for item in (trend_dossier.get("hook_patterns") or [])[:8] if str(item).strip()],
+            "hashtag_candidates": [str(item).strip() for item in (trend_dossier.get("hashtag_candidates") or [])[:12] if str(item).strip()],
+            "topical_language": [str(item).strip() for item in (trend_dossier.get("topical_language") or [])[:12] if str(item).strip()],
+            "anti_cliche_guidance": [str(item).strip() for item in (trend_dossier.get("anti_cliche_guidance") or [])[:8] if str(item).strip()],
+            "source_links": normalized_source_links,
+            "fetched_at": str(trend_dossier.get("fetched_at") or "").strip(),
+            "expires_at": str(trend_dossier.get("expires_at") or "").strip(),
+        },
         "cta_style": str((data.get("caption_defaults") or {}).get("cta_style") or "Clear, premium, direct, and conversion-aware.").strip(),
     }
 
 
-def _build_caption_messages(client_name: str, topic: str, media_type: str, profile_payload: dict[str, Any]) -> list[dict[str, str]]:
+def _resolve_caption_language(brand_data: dict[str, Any]) -> str:
+    main_language = str(brand_data.get("main_language") or "").strip().lower()
+    if main_language in {"arabic", "english", "both"}:
+        return main_language
+    language_profile = brand_data.get("language_profile") or {}
+    caption_language = str(language_profile.get("caption_output_language") or "").strip().lower()
+    primary_language = str(language_profile.get("primary_language") or "").strip().lower()
+    resolved = caption_language or primary_language
+    if resolved in {"arabic", "english"}:
+        return resolved
+    if resolved in {"bilingual", "both"}:
+        return "both"
+    return "english"
+
+
+def _language_directive(language_mode: str) -> str:
+    if language_mode == "arabic":
+        return (
+            "FIRST DIRECTIVE: Write the entire output exclusively in Arabic, including the caption, hook, CTA, and every hashtag. "
+            "Do not switch to English even if the topic, brief, or source material is in English."
+        )
+    if language_mode == "both":
+        return (
+            "FIRST DIRECTIVE: Write a bilingual caption with Arabic first and English second. "
+            "The Arabic section must come first, then a divider line containing exactly --- on its own line, then the English section below it. "
+            "Hashtags may be Arabic, English, or mixed, but the caption body must always start in Arabic."
+        )
+    return "FIRST DIRECTIVE: Write the entire output exclusively in English, including the caption, hook, CTA, and every hashtag."
+
+
+def _build_caption_messages(
+    client_name: str,
+    topic: str,
+    media_type: str,
+    profile_payload: dict[str, Any],
+    language_mode: str,
+    recent_captions: list[str],
+    failure_context: str = "",
+) -> list[dict[str, str]]:
+    recent_block = "\n".join(f"- {item}" for item in recent_captions if str(item).strip()) or "- None provided."
+    failure_block = str(failure_context or "").strip()
     return [
         {
             "role": "system",
-            "content": """You are a sharp social media copywriter for premium agencies.
-
-Return pure JSON only with exactly these fields:
-{
-  "caption": "Main caption body without hashtags",
-  "hashtags": ["#tag1", "#tag2"],
-  "seo_keyword_used": "keyword used in the caption",
-  "status": "success"
-}
-
-Rules:
-1. Use the supplied brand profile only. Do not invent brand identity.
-2. Follow language_profile.caption_output_language exactly.
-3. If caption_output_language is Arabic and arabic_mode is gulf, use Gulf Arabic.
-4. If caption_output_language is English, write clean premium English, not translated Arabic.
-5. Keep hashtags out of the caption body.
-6. Return 3-5 relevant hashtags matching the output language.
-7. Embed at least one real SEO keyword naturally in the caption body.
-8. Never use banned words.
-9. The caption must feel human, current, and publishable. Avoid generic AI-marketing cadence.
-10. Avoid these stale phrases and close variants entirely: elevate your, discover the, step into, unlock the, transform your, next level, ready to, whether you're, not just, journey.
-11. Prefer concrete details over abstract hype. Name the actual product, offer, mood, texture, result, location, or occasion when possible.
-12. Keep the rhythm natural. Use shorter sentences, fewer adjectives, and one clear CTA at most.
-13. Do not sound like a motivational coach, consultant, or generic brand manifesto unless the brand profile explicitly calls for that.
-14. If the brand voice includes emojis, use them sparingly and deliberately. If not, use none.
-15. For English output, default to crisp, modern, social-first phrasing. For Arabic output, sound native and current, not formal translation-speak.
-9. If the topic is unrelated to the brand or unsafe, return:
-{
-  "caption": "Reason the request should be held.",
-  "hashtags": [],
-  "seo_keyword_used": "",
-  "status": "held_for_review"
-}
-10. Keep the caption tight and publish-ready. Usually 35-90 words is enough unless the brand profile clearly requires more.
-11. The output must read like something a strong human social media manager would actually publish today, not a default LLM sample.""",
+            "content": (
+                "You are a sharp social media copywriter for premium agencies.\n"
+                f"{_language_directive(language_mode)}\n\n"
+                "Return pure JSON only with exactly these fields:\n"
+                "{\n"
+                '  "caption": "Main caption body without hashtags",\n'
+                '  "hashtags": ["#tag1", "#tag2"],\n'
+                '  "seo_keyword_used": "keyword used in the caption",\n'
+                '  "status": "success"\n'
+                "}\n\n"
+                "Rules:\n"
+                "1. Use the supplied brand profile only. Do not invent brand identity, offers, prices, timelines, or product claims.\n"
+                "2. The caption must open with a hook: a question, a bold statement, or a cultural reference. Never use a generic opener.\n"
+                "3. The writing must feel like a senior social strategist at a premium agency, not a template filler.\n"
+                "4. Keep hashtags out of the caption body.\n"
+                "5. Return 5-7 relevant hashtags maximum.\n"
+                "6. Hashtags must be a curated mix of 1 broad reach tag, 2 niche category tags, 2 local or market tags, and 1 brand-specific tag when possible.\n"
+                "7. Embed at least one real SEO keyword naturally in the caption body.\n"
+                "8. Never use banned words or AI-smell filler phrases.\n"
+                "9. Match the tone, style, dialect, and constraints in the brand profile exactly.\n"
+                "10. For Arabic output, use contemporary Gulf or Levantine social media Arabic that feels native and current, not formal MSA, unless the brand profile explicitly requires formal language.\n"
+                "11. Use the trend dossier only as supporting signal. Do not copy it verbatim.\n"
+                "12. Prefer concrete details over abstract hype. Name the actual product, offer, mood, texture, result, location, or occasion when possible.\n"
+                "13. Keep the rhythm natural. Use shorter sentences, fewer adjectives, and one clear CTA at most.\n"
+                "14. Do not sound like a motivational coach, consultant, or generic brand manifesto unless the brand profile explicitly calls for that.\n"
+                "15. If the brand voice includes emojis, use them sparingly and deliberately. If not, use none.\n"
+                "16. Avoid these stale phrases and close variants entirely: elevate your, discover the, step into, unlock the, transform your, next level, ready to, whether you're, not just, journey.\n"
+                "17. If the topic is unrelated to the brand or unsafe, return:\n"
+                "{\n"
+                '  "caption": "Reason the request should be held.",\n'
+                '  "hashtags": [],\n'
+                '  "seo_keyword_used": "",\n'
+                '  "status": "held_for_review"\n'
+                "}\n"
+                "18. Keep the caption tight and publish-ready. Usually 35-90 words is enough unless the brand profile clearly requires more.\n"
+                "19. For bilingual output, the caption field must contain Arabic first, then a line with exactly --- , then the English version below it.\n"
+                "20. The output must read like something a strong human social media manager would actually publish today, not a default LLM sample.\n"
+                "21. The following captions have already been used for this client recently. Your output must differ in opening hook style, sentence structure, and hashtag selection. Do not reuse any opening phrase or hashtag from this list:\n"
+                f"{recent_block}\n"
+                "22. If previous attempts failed the expert quality gate, fix every cited issue explicitly before you return the next draft."
+            ),
         },
         {
             "role": "user",
@@ -215,25 +312,26 @@ Rules:
                 f"Media Type: {media_type}\n"
                 f"Platform: Both (Facebook and Instagram)\n\n"
                 f"Do not use any of these tired phrases unless the profile explicitly demands them: {', '.join(AI_SMELL_PHRASES)}.\n"
+                f"Quality gate repair context:\n{failure_block or 'None. This is the first attempt.'}\n\n"
+                f"Trend dossier JSON:\n{json.dumps(profile_payload.get('trend_dossier') or {}, ensure_ascii=False)}\n\n"
                 f"Caption Profile JSON:\n{json.dumps(profile_payload, ensure_ascii=False)}"
             ),
         },
     ]
 
 
-def generate_caption_payload(client_name: str, topic: str, media_type: str = "image_post") -> dict:
-    profile_payload = _load_brand_profile_payload(client_name)
-    if profile_payload.get("status") != "success":
-        return {
-            "caption": str(profile_payload.get("message") or "Brand profile missing."),
-            "hashtags": [],
-            "seo_keyword_used": "",
-            "status": "error",
-            "client_name": client_name,
-        }
-
-    client, provider = _build_client()
-    compact_profile = _compact_caption_profile(profile_payload["brand_data"])
+def _generate_caption_candidate(
+    client: OpenAI,
+    *,
+    provider: str,
+    client_name: str,
+    topic: str,
+    media_type: str,
+    compact_profile: dict[str, Any],
+    language_mode: str,
+    recent_captions: list[str],
+    failure_context: str = "",
+) -> dict:
     model_candidates = []
     if CAPTION_MODEL:
         model_candidates.append(CAPTION_MODEL)
@@ -247,7 +345,15 @@ def generate_caption_payload(client_name: str, topic: str, media_type: str = "im
         try:
             response = client.chat.completions.create(
                 model=candidate_model,
-                messages=_build_caption_messages(client_name, topic, media_type, compact_profile),
+                messages=_build_caption_messages(
+                    client_name,
+                    topic,
+                    media_type,
+                    compact_profile,
+                    language_mode,
+                    [str(item).strip() for item in (recent_captions or []) if str(item).strip()][:5],
+                    failure_context,
+                ),
                 temperature=0.35,
                 max_tokens=500,
                 response_format={"type": "json_object"},
@@ -264,6 +370,80 @@ def generate_caption_payload(client_name: str, topic: str, media_type: str = "im
 
     return {
         "caption": f"Caption generation failed: {last_error}" if last_error else "Caption generation failed.",
+        "hashtags": [],
+        "seo_keyword_used": "",
+        "status": "error",
+        "client_name": client_name,
+    }
+
+
+def generate_caption_payload(client_name: str, topic: str, media_type: str = "image_post", recent_captions: list[str] = []) -> dict:
+    profile_payload = _load_brand_profile_payload(client_name)
+    if profile_payload.get("status") != "success":
+        return {
+            "caption": str(profile_payload.get("message") or "Brand profile missing."),
+            "hashtags": [],
+            "seo_keyword_used": "",
+            "status": "error",
+            "client_name": client_name,
+        }
+
+    client, provider = _build_client()
+    brand_data = dict(profile_payload["brand_data"] or {})
+    compact_profile = _compact_caption_profile(brand_data)
+    language_mode = _resolve_caption_language(brand_data)
+    trend_dossier = get_client_trend_dossier(client_name, goal=topic, campaign_context="", force_refresh=False)
+    compact_profile["trend_dossier"] = trend_dossier
+    if not compact_profile.get("main_language"):
+        compact_profile["main_language"] = language_mode
+
+    failure_context = ""
+    best_payload: dict[str, Any] | None = None
+    best_quality: dict[str, Any] | None = None
+    for _attempt in range(3):
+        candidate = _generate_caption_candidate(
+            client,
+            provider=provider,
+            client_name=client_name,
+            topic=topic,
+            media_type=media_type,
+            compact_profile=compact_profile,
+            language_mode=language_mode,
+            recent_captions=recent_captions,
+            failure_context=failure_context,
+        )
+        if str(candidate.get("status") or "").strip().lower() != "success":
+            return candidate
+        try:
+            quality = score_caption_quality(
+                candidate,
+                compact_profile,
+                language_mode=language_mode,
+                topic=topic,
+                media_type=media_type,
+            )
+        except Exception as exc:
+            quality = {
+                "score": 0,
+                "passed": False,
+                "threshold": 85,
+                "experts": [],
+                "failures": [f"Quality gate failed: {type(exc).__name__}: {exc}"],
+            }
+        candidate["quality_gate"] = quality
+        if not best_quality or float(quality.get("score") or 0) >= float(best_quality.get("score") or 0):
+            best_payload = candidate
+            best_quality = quality
+        if quality.get("passed"):
+            return candidate
+        failure_list = [str(item).strip() for item in (quality.get("failures") or []) if str(item).strip()]
+        failure_context = (
+            "Previous attempt failed the expert panel quality gate. Fix every issue below in the next draft:\n- "
+            + "\n- ".join(failure_list[:10])
+        ) if failure_list else "Previous attempt failed the expert panel quality gate. Improve hook quality, brand specificity, and hashtag freshness."
+
+    return best_payload or {
+        "caption": "Caption generation failed quality review.",
         "hashtags": [],
         "seo_keyword_used": "",
         "status": "error",

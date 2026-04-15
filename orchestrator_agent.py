@@ -5,7 +5,7 @@ import time
 import re
 from datetime import datetime, timedelta
 from agent import Agent
-from asset_store import list_client_assets
+from asset_store import get_asset_store, list_client_assets
 from client_store import get_client_store
 from schedule_store import add_scheduled_job, load_schedule
 from approval_store import save_pending_approval
@@ -32,7 +32,6 @@ SCHEDULE_WORDS = (
     "this morning",
     "tomorrow",
     "next ",
-    "this ",
     " monday",
     " tuesday",
     " wednesday",
@@ -325,11 +324,13 @@ def _resolve_loose_weekday(token: str) -> str | None:
 def _extract_clause_schedule(raw_clause: str) -> tuple[dict | None, str | None]:
     clause = _normalize_clause_text(raw_clause)
     lower = clause.lower()
-    has_schedule_language = bool(
-        TIME_WINDOW_RE.search(lower)
-        or DATE_TOKEN_RE.search(lower)
-        or any(token in lower for token in SCHEDULE_WORDS)
-    )
+    has_explicit_time = bool(TIME_WINDOW_RE.search(lower))
+    has_explicit_date = bool(DATE_TOKEN_RE.search(lower))
+    has_schedule_keyword = any(token in lower for token in SCHEDULE_WORDS)
+    if contains_immediate_intent(lower) and not has_explicit_time and not has_explicit_date and "schedule" not in lower:
+        return None, None
+
+    has_schedule_language = bool(has_explicit_time or has_explicit_date or has_schedule_keyword)
     if not has_schedule_language:
         return None, None
 
@@ -780,6 +781,49 @@ def resolve_saved_draft_reference(client_id: str, bundle_name: str | None = None
     return None
 
 
+def build_publish_draft_refs(client_id: str, resolved_draft: dict | None = None, bundle_name: str | None = None, draft_id: str | None = None) -> list[dict]:
+    client_id = str(client_id or "").strip()
+    if not client_id:
+        return []
+    payload = (resolved_draft or {}).get("payload") or {}
+    resolved_name = str((resolved_draft or {}).get("bundle_name") or bundle_name or payload.get("bundle_name") or payload.get("draft_name") or "").strip()
+    resolved_draft_id = str(payload.get("draft_id") or draft_id or "").strip()
+    bundle_items = []
+    asset_index = {}
+    try:
+        for asset in list_client_assets(client_id):
+            filename = str(asset.get("filename") or "").strip()
+            if filename:
+                asset_index[filename] = asset
+    except Exception:
+        asset_index = {}
+    store = get_asset_store()
+    for item in list(payload.get("items") or []):
+        filename = str(item.get("filename") or "").strip()
+        if not filename:
+            continue
+        kind = str(item.get("kind") or "").strip().lower()
+        asset = asset_index.get(filename) or {}
+        media_kind = kind or str(asset.get("kind") or "").strip().lower()
+        metadata = asset.get("metadata") or {}
+        thumb_url = store.preview_poster_url(client_id, asset) if media_kind == "video" else store.preview_asset_url(client_id, asset)
+        full_url = store.public_poster_url(client_id, filename) if media_kind == "video" else store.public_asset_url(client_id, filename)
+        bundle_items.append({
+            "filename": filename,
+            "kind": media_kind or kind,
+            "thumb_url": thumb_url,
+            "full_url": full_url,
+            "poster_thumb_url": store.preview_poster_url(client_id, asset) if media_kind == "video" else "",
+            "poster_full_url": store.public_poster_url(client_id, filename) if metadata.get("has_poster") or media_kind == "video" else "",
+        })
+    return [{
+        "client_id": client_id,
+        "draft_name": resolved_name,
+        "draft_id": resolved_draft_id,
+        "items": bundle_items,
+    }]
+
+
 def extract_forced_draft_refs(prompt: str) -> list[dict]:
     refs = []
     raw = str(prompt or "")
@@ -897,6 +941,68 @@ class ReadClientBriefTool:
         if not payload:
             return {"error": f"Profile '{client_id}' not found."}
         return payload
+
+class RunStrategyPlanTool:
+    def get_schema(self):
+        return {
+            "type": "function",
+            "function": {
+                "name": "run_strategy_plan",
+                "description": "Build and save a strategy plan for a client. Use this for planning, strategy, trend, competitor, or content-plan requests.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "client_id": {"type": "string", "description": "The exact client workspace ID."},
+                        "goal": {"type": "string", "description": "The planning goal or question Jarvis should solve."},
+                        "window": {"type": "string", "description": "The planning window, for example next_7_days or next_30_days."},
+                        "campaign_context": {"type": "string", "description": "Any extra campaign context, positioning, or offer details."},
+                    },
+                    "required": ["client_id", "goal", "window", "campaign_context"],
+                },
+            },
+        }
+
+    def execute(self, client_id, goal="", window="next_7_days", campaign_context="", **_kwargs):
+        from strategy_agent import run_strategy_agent, summarize_strategy_plan_reply
+
+        resolved_client = resolve_client_id(client_id)
+        if not resolved_client:
+            return {"error": "Jarvis needs an explicit client before it can build a strategy plan."}
+
+        normalized_goal = str(goal or "").strip()
+        normalized_window = str(window or "next_7_days").strip() or "next_7_days"
+        normalized_context = str(campaign_context or "").strip()
+        requested_parts = [
+            f"Build a strategy plan for @{resolved_client}.",
+            f"Window: {normalized_window}.",
+            f"Goal: {normalized_goal or 'No explicit goal provided.'}",
+        ]
+        if normalized_context:
+            requested_parts.append(f"Campaign context: {normalized_context}")
+        requested_prompt = " ".join(part for part in requested_parts if part).strip()
+
+        strategy_plan = run_strategy_agent(
+            resolved_client,
+            window=normalized_window,
+            goal=normalized_goal,
+            campaign_context=normalized_context,
+            requested_prompt=requested_prompt,
+        )
+        if not isinstance(strategy_plan, dict):
+            return {"error": "Strategy planning returned an invalid payload."}
+        if strategy_plan.get("error"):
+            return {"error": str(strategy_plan.get("error") or "").strip()}
+
+        summary = summarize_strategy_plan_reply(strategy_plan)
+        return {
+            "client_id": resolved_client,
+            "goal": normalized_goal,
+            "window": normalized_window,
+            "campaign_context": normalized_context,
+            "strategy_plan": strategy_plan,
+            "summary": summary,
+            "plan_id": str(strategy_plan.get("plan_id") or "").strip(),
+        }
 
 class AutonomousScheduleTool:
     def get_schema(self):
@@ -1221,7 +1327,7 @@ class TriggerPipelineNowTool:
             "type": "function",
             "function": {
                 "name": "trigger_pipeline_now",
-                "description": "IMMEDIATELY execute the full content pipeline for a client: generates a caption via the Caption Agent, publishes to Meta (Facebook + Instagram), and sends a WhatsApp briefing. Use this for any 'post now' or same-day requests. This tool BLOCKS until the pipeline finishes and returns the real result.",
+                "description": "IMMEDIATELY execute the full content pipeline for a client: generates a caption via the Caption Service, publishes through the Publishing Engine (Facebook + Instagram), and sends a WhatsApp briefing. Use this for any 'post now' or same-day requests. This tool BLOCKS until the pipeline finishes and returns the real result.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1246,6 +1352,7 @@ class TriggerPipelineNowTool:
             
         try:
             resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic, draft_id=draft_id)
+            publish_draft_refs = build_publish_draft_refs(client_id, resolved_draft, bundle_name=bundle_name, draft_id=draft_id)
             if resolved_draft:
                 bundle_name = resolved_draft["bundle_name"]
                 payload = resolved_draft["payload"]
@@ -1324,12 +1431,14 @@ class TriggerPipelineNowTool:
                     "message": "Immediate publish partially succeeded for "
                     f"{client_id}. " + (" ".join(parts) if parts else (pipeline_message or "At least one platform published successfully while another failed.")),
                     "output": output[-1500:],
+                    "draft_refs": publish_draft_refs,
                 }
             else:
                 return {
                     "status": "success",
                     "message": summarize_pipeline_publish_success(output, client_id, pipeline_message),
                     "output": output[-1500:],
+                    "draft_refs": publish_draft_refs,
                 }
         except subprocess.TimeoutExpired:
             return {"error": f"Immediate publish failed for {client_id}: Pipeline timed out after 120 seconds."}
@@ -1564,7 +1673,7 @@ class OrchestratorAgent(Agent):
     def __init__(self):
         today_context = datetime.now().strftime("%A, %B %d, %Y")
         tools = [
-            ListClientVaultTool(), ReadVaultQueueTool(), ReadClientBriefTool(), AutonomousScheduleTool(),
+            ListClientVaultTool(), ReadVaultQueueTool(), ReadClientBriefTool(), RunStrategyPlanTool(), AutonomousScheduleTool(),
             ReadCronScheduleTool(), ReadPipelineStreamTool(), TriggerPipelineNowTool(), MetaInsightsScannerTool(),
             WebSearchTool(), RequestApprovalTool()
         ]
@@ -1589,10 +1698,11 @@ class OrchestratorAgent(Agent):
             "7. If the user explicitly repeats the same creative draft name in their message, DO NOT SCHEDULE IT TWICE. Deduplicate their intent and only call the tool ONCE per unique draft. "
             "7b. If the user includes any future day/date/time phrase such as today at 6 PM, tomorrow, next Friday, or April 21, that is a scheduling request, not an immediate publish request. Route it to request_client_approval unless the user explicitly says post now or immediately. "
             "8. ANALYTICS: When asked about performance, insights, engagement, or analytics, use 'meta_insights_scanner'. Present the data conversationally — highlight the top post, compare carousel vs single-image performance, mention the best posting day, and make actionable recommendations. "
-            "9. STRATEGY & RESEARCH: When asked about strategy, trends, competitor analysis, 'what should we do', or anything requiring current market knowledge, use 'web_search' to find real-time information. Combine search results with any available analytics data from 'meta_insights_scanner' to create data-backed strategy recommendations. Always cite your sources. "
-            "10. ABSOLUTE HONESTY RULE: If ANY tool you call returns an error, failure, or exception, you MUST relay the EXACT error message to the user. NEVER claim success, NEVER soften the message, NEVER say 'posted successfully' or 'minor hiccup' when a tool failed. The user must know the truth. Violations of this rule are catastrophic. "
-            "11. Be endlessly helpful and precise regarding anything related to the agency. "
-            "12. Keep responses high-end, concise, and action-oriented."
+            "9. CAPTION HANDOFF: Do NOT attempt to write, generate, or refine caption copy in this chat loop. If the user asks for a caption, tell them captions are prepared in the client vault and that you can help post or schedule once the draft is ready there. "
+            "10. STRATEGY & PLANNING: When asked about strategy, trends, competitor analysis, content ideas, content plans, or 'what should we do', use `run_strategy_plan` as the primary planning path. Use `web_search` only when you need supplemental live web context outside the saved plan output. Cite sources whenever the strategy plan includes them. "
+            "11. ABSOLUTE HONESTY RULE: If ANY tool you call returns an error, failure, or exception, you MUST relay the EXACT error message to the user. NEVER claim success, NEVER soften the message, NEVER say 'posted successfully' or 'minor hiccup' when a tool failed. The user must know the truth. Violations of this rule are catastrophic. "
+            "12. Be endlessly helpful and precise regarding anything related to the agency. "
+            "13. Keep responses high-end, concise, and action-oriented."
         )
 
 _global_agent = OrchestratorAgent()
@@ -1613,6 +1723,7 @@ def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, orig
     last_tool_fingerprint = None
     last_error_message = None
     last_structured_action = None
+    last_strategy_plan = None
     
     while i < max_turns:
         i += 1
@@ -1629,6 +1740,7 @@ def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, orig
             current_fingerprint_parts = []
             round_errors = []
             immediate_replies = []
+            immediate_draft_refs = []
             for tool_call in message.tool_calls:
                 tool_name = tool_call.function.name
                 try:
@@ -1682,17 +1794,33 @@ def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, orig
                         "message": str(tool_result.get("message") or "").strip(),
                     }
                 elif (
+                    tool_name == "run_strategy_plan"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("strategy_plan")
+                ):
+                    last_strategy_plan = tool_result.get("strategy_plan")
+                    last_structured_action = {
+                        "type": "strategy_plan",
+                        "plan_id": str(tool_result.get("plan_id") or last_strategy_plan.get("plan_id") or "").strip(),
+                        "client_id": str(tool_result.get("client_id") or last_strategy_plan.get("client_id") or "").strip(),
+                        "message": str(tool_result.get("summary") or "").strip(),
+                    }
+                elif (
                     tool_name == "trigger_pipeline_now"
                     and isinstance(tool_result, dict)
                     and tool_result.get("status") == "partial_success"
                 ):
                     immediate_replies.append(str(tool_result.get("message") or "").strip())
+                    if isinstance(tool_result.get("draft_refs"), list):
+                        immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
                 elif (
                     tool_name == "trigger_pipeline_now"
                     and isinstance(tool_result, dict)
                     and tool_result.get("status") == "success"
                 ):
                     immediate_replies.append(str(tool_result.get("message") or "").strip())
+                    if isinstance(tool_result.get("draft_refs"), list):
+                        immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
                 elif (
                     tool_name == "trigger_pipeline_now"
                     and isinstance(tool_result, dict)
@@ -1721,7 +1849,10 @@ def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, orig
                 return {"reply": round_errors[-1]}
 
             if immediate_replies:
-                return {"reply": summarize_multi_publish_results(immediate_replies)}
+                payload = {"reply": summarize_multi_publish_results(immediate_replies)}
+                if immediate_draft_refs:
+                    payload["draft_refs"] = immediate_draft_refs
+                return payload
 
             user_input = "" 
         else:
@@ -1731,6 +1862,8 @@ def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, orig
             payload = {"reply": final_reply}
             if last_structured_action:
                 payload["action"] = last_structured_action
+            if last_strategy_plan:
+                payload["strategy_plan"] = last_strategy_plan
             return payload
             
     if last_error_message:

@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import json
+import time
 from urllib.parse import quote
 from typing import Any
 
@@ -21,19 +22,24 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_INSTAGRAM_IMAGE_DIMENSION = 1440
 MIN_INSTAGRAM_ASPECT_RATIO = 4 / 5
 MAX_INSTAGRAM_ASPECT_RATIO = 1.91
+VAULT_PREVIEW_WIDTH = 240
+VAULT_PREVIEW_HEIGHT = 240
+VAULT_PREVIEW_QUALITY = 72
+JSON_METADATA_SUFFIX = ".meta.json"
+JSON_THUMBNAIL_SUFFIX = ".thumb.jpg"
 
 
 def _probe_image_metadata(filename: str, file_bytes: bytes) -> dict[str, Any]:
     try:
-        handle = tempfile.SpooledTemporaryFile()
-        handle.write(file_bytes)
-        handle.seek(0)
-        with Image.open(handle) as image:
-            image_format = str(image.format or "").upper()
-            progressive = bool(image.info.get("progressive") or image.info.get("progression"))
-            image = ImageOps.exif_transpose(image)
-            width, height = image.size
-            mode = str(image.mode or "").upper()
+        with tempfile.SpooledTemporaryFile() as handle:
+            handle.write(file_bytes)
+            handle.seek(0)
+            with Image.open(handle) as image:
+                image_format = str(image.format or "").upper()
+                progressive = bool(image.info.get("progressive") or image.info.get("progression"))
+                image = ImageOps.exif_transpose(image)
+                width, height = image.size
+                mode = str(image.mode or "").upper()
     except Exception:
         return {
             "image_inspection_version": 1,
@@ -82,36 +88,57 @@ def _probe_image_metadata(filename: str, file_bytes: bytes) -> dict[str, Any]:
     }
 
 
+def _new_preview_version() -> str:
+    return str(int(time.time() * 1000))
+
+
+def _build_thumbnail_bytes(file_bytes: bytes, width: int = VAULT_PREVIEW_WIDTH, height: int = VAULT_PREVIEW_HEIGHT) -> bytes:
+    with tempfile.SpooledTemporaryFile() as handle:
+        handle.write(file_bytes)
+        handle.seek(0)
+        with Image.open(handle) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
+            if image.mode == "L":
+                image = image.convert("RGB")
+            thumb = ImageOps.fit(image, (width, height), Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+            with tempfile.SpooledTemporaryFile() as output:
+                thumb.save(output, format="JPEG", quality=VAULT_PREVIEW_QUALITY, optimize=True, progressive=False)
+                output.seek(0)
+                return output.read()
+
+
 def _normalize_image_upload(filename: str, file_bytes: bytes) -> tuple[str, bytes, dict[str, Any]]:
     extension = os.path.splitext(str(filename or "").strip())[1].lower()
     if extension not in IMAGE_EXTENSIONS:
         return filename, file_bytes, {}
 
-    handle = tempfile.SpooledTemporaryFile()
-    handle.write(file_bytes)
-    handle.seek(0)
-    with Image.open(handle) as image:
-        image = ImageOps.exif_transpose(image)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        if max(image.size) > MAX_INSTAGRAM_IMAGE_DIMENSION:
-            image.thumbnail((MAX_INSTAGRAM_IMAGE_DIMENSION, MAX_INSTAGRAM_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
+    with tempfile.SpooledTemporaryFile() as handle:
+        handle.write(file_bytes)
+        handle.seek(0)
+        with Image.open(handle) as image:
+            image = ImageOps.exif_transpose(image)
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            if max(image.size) > MAX_INSTAGRAM_IMAGE_DIMENSION:
+                image.thumbnail((MAX_INSTAGRAM_IMAGE_DIMENSION, MAX_INSTAGRAM_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
 
-        output = tempfile.SpooledTemporaryFile()
-        image.save(output, format="JPEG", quality=92, optimize=True, progressive=False)
-        output.seek(0)
-        normalized_bytes = output.read()
-        stem = os.path.splitext(str(filename or "").strip() or "image")[0]
-        normalized_filename = f"{stem}.jpg"
-        metadata = {
-            "normalized_for_meta": True,
-            "original_filename": filename,
-            "original_extension": extension,
-            "normalization_pipeline": "pillow_rgb_baseline_jpeg",
-            **_probe_image_metadata(normalized_filename, normalized_bytes),
-            "has_poster": False,
-        }
-        return normalized_filename, normalized_bytes, metadata
+            with tempfile.SpooledTemporaryFile() as output:
+                image.save(output, format="JPEG", quality=92, optimize=True, progressive=False)
+                output.seek(0)
+                normalized_bytes = output.read()
+            stem = os.path.splitext(str(filename or "").strip() or "image")[0]
+            normalized_filename = f"{stem}.jpg"
+            metadata = {
+                "normalized_for_meta": True,
+                "original_filename": filename,
+                "original_extension": extension,
+                "normalization_pipeline": "pillow_rgb_baseline_jpeg",
+                **_probe_image_metadata(normalized_filename, normalized_bytes),
+                "has_poster": False,
+            }
+            return normalized_filename, normalized_bytes, metadata
 
 
 def _safe_normalize_image_upload(filename: str, file_bytes: bytes) -> tuple[str, bytes, dict[str, Any]]:
@@ -473,6 +500,14 @@ class BaseAssetStore:
     def public_poster_url(self, client_id: str, filename: str) -> str:
         return ""
 
+    def preview_asset_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        filename = str(asset.get("filename") or "").strip()
+        return self.public_asset_url(client_id, filename)
+
+    def preview_poster_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        filename = str(asset.get("filename") or "").strip()
+        return self.public_poster_url(client_id, filename)
+
 
 class JsonAssetStore(BaseAssetStore):
     backend_name = "json"
@@ -483,6 +518,68 @@ class JsonAssetStore(BaseAssetStore):
     def _asset_path(self, client_id: str, filename: str) -> str:
         return os.path.join(self._client_dir(client_id), filename)
 
+    def _metadata_path(self, client_id: str, filename: str) -> str:
+        return self._asset_path(client_id, filename) + JSON_METADATA_SUFFIX
+
+    def _thumbnail_path(self, client_id: str, filename: str) -> str:
+        return self._asset_path(client_id, filename) + JSON_THUMBNAIL_SUFFIX
+
+    def _poster_path(self, client_id: str, filename: str) -> str:
+        return self._asset_path(client_id, filename) + ".jpg"
+
+    def _poster_thumbnail_path(self, client_id: str, filename: str) -> str:
+        return self._poster_path(client_id, filename) + JSON_THUMBNAIL_SUFFIX
+
+    def _write_metadata(self, client_id: str, filename: str, metadata: dict[str, Any]) -> None:
+        with open(self._metadata_path(client_id, filename), "w", encoding="utf-8") as handle:
+            json.dump(_json_safe_metadata(metadata) or {}, handle, ensure_ascii=False, indent=2)
+
+    def _load_metadata(self, client_id: str, filename: str) -> dict[str, Any]:
+        path = self._metadata_path(client_id, filename)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _is_sidecar_filename(self, filename: str) -> bool:
+        lowered = str(filename or "").strip().lower()
+        if not lowered or lowered == "queue.json" or lowered.endswith(JSON_METADATA_SUFFIX) or lowered.endswith(JSON_THUMBNAIL_SUFFIX):
+            return True
+        return any(lowered.endswith(f"{ext}.jpg") for ext in VIDEO_EXTENSIONS)
+
+    def _relative_asset_url(self, client_id: str, filename: str) -> str:
+        encoded_client = quote(client_id, safe="")
+        encoded_filename = "/".join(quote(part, safe="") for part in str(filename or "").split("/"))
+        return f"/assets/{encoded_client}/{encoded_filename}"
+
+    def _fallback_preview_version(self, paths: list[str]) -> str:
+        mtimes = [os.path.getmtime(path) for path in paths if path and os.path.exists(path)]
+        if not mtimes:
+            return _new_preview_version()
+        return str(int(max(mtimes) * 1000))
+
+    def _ensure_preview_artifacts(self, client_id: str, filename: str, kind: str, metadata: dict[str, Any]) -> None:
+        asset_path = self._asset_path(client_id, filename)
+        if kind == "image" and os.path.exists(asset_path):
+            thumb_path = self._thumbnail_path(client_id, filename)
+            if not os.path.exists(thumb_path):
+                with open(asset_path, "rb") as handle:
+                    thumb_bytes = _build_thumbnail_bytes(handle.read())
+                with open(thumb_path, "wb") as handle:
+                    handle.write(thumb_bytes)
+        elif kind == "video" and metadata.get("has_poster"):
+            poster_path = self._poster_path(client_id, filename)
+            poster_thumb_path = self._poster_thumbnail_path(client_id, filename)
+            if os.path.exists(poster_path) and not os.path.exists(poster_thumb_path):
+                with open(poster_path, "rb") as handle:
+                    thumb_bytes = _build_thumbnail_bytes(handle.read())
+                with open(poster_thumb_path, "wb") as handle:
+                    handle.write(thumb_bytes)
+
     def list_assets(self, client_id: str) -> list[dict[str, Any]]:
         client_dir = self._client_dir(client_id)
         if not os.path.exists(client_dir):
@@ -491,20 +588,33 @@ class JsonAssetStore(BaseAssetStore):
         assets = []
         for name in sorted(os.listdir(client_dir)):
             path = os.path.join(client_dir, name)
-            if not os.path.isfile(path) or name == "queue.json" or name.lower().endswith(".mp4.jpg"):
+            if not os.path.isfile(path) or self._is_sidecar_filename(name):
                 continue
             mime_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-            has_poster = os.path.exists(path + ".jpg") if detect_media_kind(name) == "video" else False
+            kind = detect_media_kind(name)
+            has_poster = os.path.exists(self._poster_path(client_id, name)) if kind == "video" else False
+            metadata = {
+                **self._load_metadata(client_id, name),
+                "mime_type": mime_type,
+                "byte_size": os.path.getsize(path),
+                "has_poster": has_poster,
+            }
+            if not str(metadata.get("preview_version") or "").strip():
+                metadata["preview_version"] = self._fallback_preview_version(
+                    [
+                        path,
+                        self._poster_path(client_id, name),
+                        self._thumbnail_path(client_id, name),
+                        self._poster_thumbnail_path(client_id, name),
+                    ]
+                )
+            self._ensure_preview_artifacts(client_id, name, kind, metadata)
             assets.append(
                 {
                     "filename": name,
-                    "kind": detect_media_kind(name),
+                    "kind": kind,
                     "storage_path": path.replace("\\", "/"),
-                    "metadata": {
-                        "mime_type": mime_type,
-                        "byte_size": os.path.getsize(path),
-                        "has_poster": has_poster,
-                    },
+                    "metadata": metadata,
                 }
             )
         return assets
@@ -520,7 +630,7 @@ class JsonAssetStore(BaseAssetStore):
         existing_names = {
             name
             for name in os.listdir(client_dir)
-            if os.path.isfile(os.path.join(client_dir, name)) and name != "queue.json" and not name.lower().endswith(".mp4.jpg")
+            if os.path.isfile(os.path.join(client_dir, name)) and not self._is_sidecar_filename(name)
         }
         filename = _next_available_filename(filename, existing_names)
         path = self._asset_path(client_id, filename)
@@ -528,20 +638,30 @@ class JsonAssetStore(BaseAssetStore):
             f.write(file_bytes)
 
         normalization_meta, poster_bytes = _finalize_normalization_meta(normalization_meta)
+        normalization_meta["preview_version"] = _new_preview_version()
         if poster_bytes:
-            with open(path + ".jpg", "wb") as pf:
+            with open(self._poster_path(client_id, filename), "wb") as pf:
                 pf.write(poster_bytes)
+            with open(self._poster_thumbnail_path(client_id, filename), "wb") as pf:
+                pf.write(_build_thumbnail_bytes(poster_bytes))
+        elif os.path.exists(self._poster_thumbnail_path(client_id, filename)):
+            os.remove(self._poster_thumbnail_path(client_id, filename))
+        if kind == "image":
+            with open(self._thumbnail_path(client_id, filename), "wb") as tf:
+                tf.write(_build_thumbnail_bytes(file_bytes))
         mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        metadata = {
+            "mime_type": mime_type,
+            "byte_size": len(file_bytes),
+            **normalization_meta,
+        }
+        self._write_metadata(client_id, filename, metadata)
 
         return {
             "filename": filename,
             "kind": detect_media_kind(filename),
             "storage_path": path.replace("\\", "/"),
-            "metadata": {
-                "mime_type": mime_type,
-                "byte_size": len(file_bytes),
-                **normalization_meta,
-            },
+            "metadata": metadata,
         }
 
     def delete_asset(self, client_id: str, filename: str) -> bool:
@@ -549,9 +669,16 @@ class JsonAssetStore(BaseAssetStore):
         if not os.path.exists(path):
             return False
         os.remove(path)
-        poster_path = path + ".jpg"
+        poster_path = self._poster_path(client_id, filename)
         if os.path.exists(poster_path):
             os.remove(poster_path)
+        for sidecar in (
+            self._thumbnail_path(client_id, filename),
+            self._poster_thumbnail_path(client_id, filename),
+            self._metadata_path(client_id, filename),
+        ):
+            if os.path.exists(sidecar):
+                os.remove(sidecar)
         return True
 
     def delete_client_assets(self, client_id: str) -> int:
@@ -573,13 +700,28 @@ class JsonAssetStore(BaseAssetStore):
         return os.path.exists(self._asset_path(client_id, filename))
 
     def poster_exists(self, client_id: str, filename: str) -> bool:
-        return os.path.exists(self._asset_path(client_id, filename) + ".jpg")
+        return os.path.exists(self._poster_path(client_id, filename))
 
     def public_asset_url(self, client_id: str, filename: str) -> str:
-        return ""
+        return self._relative_asset_url(client_id, filename)
 
     def public_poster_url(self, client_id: str, filename: str) -> str:
-        return ""
+        if not self.poster_exists(client_id, filename):
+            return ""
+        return self._relative_asset_url(client_id, f"{filename}.jpg")
+
+    def preview_asset_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        filename = str(asset.get("filename") or "").strip()
+        if not filename:
+            return ""
+        return self._relative_asset_url(client_id, f"{filename}{JSON_THUMBNAIL_SUFFIX}")
+
+    def preview_poster_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        filename = str(asset.get("filename") or "").strip()
+        metadata = asset.get("metadata") or {}
+        if not filename or not metadata.get("has_poster"):
+            return ""
+        return self._relative_asset_url(client_id, f"{filename}.jpg{JSON_THUMBNAIL_SUFFIX}")
 
     def repair_asset_for_meta(self, client_id: str, filename: str) -> dict[str, Any]:
         current = self.get_asset_content(client_id, filename)
@@ -597,23 +739,35 @@ class JsonAssetStore(BaseAssetStore):
         with open(path, "wb") as f:
             f.write(normalized_bytes)
         normalization_meta, poster_bytes = _finalize_normalization_meta(normalization_meta)
+        normalization_meta["preview_version"] = _new_preview_version()
         if poster_bytes:
-            with open(path + ".jpg", "wb") as pf:
+            with open(self._poster_path(client_id, filename), "wb") as pf:
                 pf.write(poster_bytes)
-        elif os.path.exists(path + ".jpg"):
-            os.remove(path + ".jpg")
+            with open(self._poster_thumbnail_path(client_id, filename), "wb") as pf:
+                pf.write(_build_thumbnail_bytes(poster_bytes))
+        elif os.path.exists(self._poster_path(client_id, filename)):
+            os.remove(self._poster_path(client_id, filename))
+        if kind == "image":
+            with open(self._thumbnail_path(client_id, filename), "wb") as tf:
+                tf.write(_build_thumbnail_bytes(normalized_bytes))
+        elif os.path.exists(self._thumbnail_path(client_id, filename)):
+            os.remove(self._thumbnail_path(client_id, filename))
+        if not poster_bytes and os.path.exists(self._poster_thumbnail_path(client_id, filename)):
+            os.remove(self._poster_thumbnail_path(client_id, filename))
         mime_type = "video/mp4" if kind == "video" else "image/jpeg"
+        metadata = {
+            "mime_type": mime_type,
+            "byte_size": len(normalized_bytes),
+            **normalization_meta,
+            "repaired_for_meta": True,
+        }
+        self._write_metadata(client_id, filename, metadata)
             
         return {
             "filename": filename,
             "kind": detect_media_kind(filename),
             "storage_path": path.replace("\\", "/"),
-            "metadata": {
-                "mime_type": mime_type,
-                "byte_size": len(normalized_bytes),
-                **normalization_meta,
-                "repaired_for_meta": True,
-            },
+            "metadata": metadata,
         }
 
 
@@ -645,6 +799,7 @@ class SupabaseAssetStore(BaseAssetStore):
             "filename": str(row.get("original_filename") or "").strip(),
             "kind": str(row.get("media_kind") or detect_media_kind(str(row.get("original_filename") or ""))).strip().lower(),
             "storage_path": str(row.get("storage_path") or "").strip(),
+            "created_at": row.get("created_at"),
             "metadata": {
                 **metadata,
                 "mime_type": mime_type,
@@ -672,6 +827,7 @@ class SupabaseAssetStore(BaseAssetStore):
         self._upload_bytes(storage_path, filename, file_bytes, mime_type)
         if poster_bytes:
             self._upload_bytes(storage_path + ".jpg", filename + ".jpg", poster_bytes, "image/jpeg")
+        normalization_meta["preview_version"] = _new_preview_version()
         row = {
             "client_id": client_id,
             "storage_bucket": self.bucket,
@@ -783,6 +939,29 @@ class SupabaseAssetStore(BaseAssetStore):
             return ""
         return f"{self.project_url}/storage/v1/object/public/{self.bucket}/{quote(storage_path + '.jpg', safe='/')}"
 
+    def preview_asset_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        storage_path = str(asset.get("storage_path") or "").strip()
+        if not storage_path:
+            return ""
+        return (
+            f"{self.project_url}/storage/v1/render/image/public/"
+            f"{self.bucket}/{quote(storage_path, safe='/')}?width={VAULT_PREVIEW_WIDTH}&height={VAULT_PREVIEW_HEIGHT}"
+            f"&resize=cover&quality={VAULT_PREVIEW_QUALITY}"
+        )
+
+    def preview_poster_url(self, client_id: str, asset: dict[str, Any]) -> str:
+        metadata = asset.get("metadata") or {}
+        if not metadata.get("has_poster"):
+            return ""
+        storage_path = str(asset.get("storage_path") or "").strip()
+        if not storage_path:
+            return ""
+        return (
+            f"{self.project_url}/storage/v1/render/image/public/"
+            f"{self.bucket}/{quote(storage_path + '.jpg', safe='/')}?width={VAULT_PREVIEW_WIDTH}&height={VAULT_PREVIEW_HEIGHT}"
+            f"&resize=cover&quality={VAULT_PREVIEW_QUALITY}"
+        )
+
     def repair_asset_for_meta(self, client_id: str, filename: str) -> dict[str, Any]:
         rows = self._list_rows(client_id, filename)
         if not rows:
@@ -811,6 +990,7 @@ class SupabaseAssetStore(BaseAssetStore):
         self._upload_bytes(storage_path, filename, normalized_bytes, mime_type)
         if poster_bytes:
             self._upload_bytes(storage_path + ".jpg", filename + ".jpg", poster_bytes, "image/jpeg")
+        normalization_meta["preview_version"] = _new_preview_version()
         metadata = {
             **(row.get("metadata") or {}),
             "mime_type": mime_type,

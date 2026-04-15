@@ -1,0 +1,12 @@
+{
+    "15551234567": {
+        "phone": "15551234567",
+        "payload_json": {
+            "mode": "connect_wait",
+            "pending_connect_client_id": "client_a",
+            "pending_connect_state": "eyJjbGllbnRfaWQiOiJjbGllbnRfYSIsIm9wZXJhdG9yX3Bob25lIjoiMTU1NTEyMzQ1NjciLCJub25jZSI6IjkyMzEyNGI2MjU5MjQyZjJhYTY1NjZlNDJkMzQ0NWI3IiwiaXNzdWVkX2F0IjoiMjAyNi0wNC0xNFQxMDowMDo1OC4xMzI3NzYrMDA6MDAifQ",
+            "updated_at": "2026-04-14T10:00:58.132821+00:00"
+        },
+        "updated_at": "2026-04-14T10:00:58.296696+00:00"
+    }
+}

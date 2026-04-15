@@ -16,17 +16,17 @@ load_dotenv()
 
 
 def get_agency_runtime_config() -> dict:
-    config = {}
+    file_config = {}
     if os.path.exists("agency_config.json"):
         try:
             with open("agency_config.json", "r", encoding="utf-8") as f:
-                config = json.load(f)
+                file_config = json.load(f)
         except Exception:
-            config = {}
+            file_config = {}
     return {
-        "owner_phone": str(config.get("owner_phone") or os.getenv("OWNER_PHONE", "")).strip(),
-        "whatsapp_access_token": str(config.get("whatsapp_access_token") or os.getenv("WHATSAPP_TOKEN", "")).strip(),
-        "whatsapp_phone_id": str(config.get("whatsapp_phone_id") or os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID", "")).strip(),
+        "owner_phone": str(os.getenv("OWNER_PHONE") or file_config.get("owner_phone") or "").strip(),
+        "whatsapp_access_token": str(os.getenv("WHATSAPP_TOKEN") or "").strip(),
+        "whatsapp_phone_id": str(os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID") or "").strip(),
     }
 
 
@@ -50,6 +50,7 @@ def send_owner_briefing(client_name, caption, platforms, publish_results=None, i
     media_type = "Single Video" if video_count else ("Carousel" if image_count > 1 else "Single Image" if image_count == 1 else "Text Only")
 
     post_ids = ""
+    platform_outcome_lines = []
     if publish_results:
         pr = publish_results.get("platform_results", {})
         fb_id = pr.get("facebook", {}).get("post_id")
@@ -58,15 +59,31 @@ def send_owner_briefing(client_name, caption, platforms, publish_results=None, i
             post_ids += f"\nFB: fb.com/{fb_id}"
         if ig_id:
             post_ids += f"\nIG: {ig_id}"
+        fb_status = str(pr.get("facebook", {}).get("status") or "").strip().lower()
+        ig_status = str(pr.get("instagram", {}).get("status") or "").strip().lower()
+        if fb_status == "published":
+            platform_outcome_lines.append("Facebook: published")
+        elif fb_status == "error":
+            platform_outcome_lines.append("Facebook: failed")
+        if ig_status == "published":
+            platform_outcome_lines.append("Instagram: published")
+        elif ig_status == "error":
+            ig_step = str(pr.get("instagram", {}).get("step") or "").strip()
+            platform_outcome_lines.append(f"Instagram: failed{f' ({ig_step})' if ig_step else ''}")
 
     timestamp = datetime.now().strftime("%I:%M %p")
+    headline = "Post Published Successfully 🟢"
+    if publish_results and str(publish_results.get("status") or "").strip().lower() == "partial_success":
+        headline = "Post Published Partially 🟡"
 
     text = (
-        f"Post Published Successfully 🟢\n\n"
+        f"{headline}\n\n"
         f"Client: {client_name.replace('_', ' ').title()}\n"
         f"Platforms: {platform_str}\n"
         f"Format: {media_type}\n"
         f"Time: {timestamp}\n\n"
+        + (f"Platform Status:\n" + "\n".join(platform_outcome_lines) + "\n\n" if platform_outcome_lines else "")
+        +
         f"Caption Preview:\n{preview}"
         f"{post_ids}"
     )
@@ -84,6 +101,80 @@ def send_owner_briefing(client_name, caption, platforms, publish_results=None, i
             logger.info(f"WhatsApp briefing sent to {owner_phone}")
     except Exception as e:
         logger.warning(f"WhatsApp briefing failed: {e}")
+
+
+def _summarize_platform_failures(publish_results: dict) -> list[str]:
+    platform_results = publish_results.get("platform_results", {}) or {}
+    lines: list[str] = []
+    for platform_name, platform_data in platform_results.items():
+        if str(platform_data.get("status") or "").strip().lower() != "error":
+            continue
+        label = str(platform_name or "platform").strip().capitalize()
+        step = str(platform_data.get("step") or "").strip()
+        error_message = str(platform_data.get("error_message") or "Publishing failed.").strip()
+        if step:
+            lines.append(f"{label}: {error_message} (step: {step})")
+        else:
+            lines.append(f"{label}: {error_message}")
+    return lines
+
+
+def build_failure_reason(publish_results: dict) -> str:
+    lines = _summarize_platform_failures(publish_results)
+    if lines:
+        detail = " | ".join(lines)
+        return detail[:500]
+    return str(publish_results.get("message") or "Publishing failed.").strip()[:500]
+
+
+def send_owner_failure_briefing(
+    client_name: str,
+    topic: str,
+    publish_results: dict,
+    draft_name: str | None = None,
+    scheduled_job: bool = False,
+) -> None:
+    config = get_agency_runtime_config()
+    owner_phone = config["owner_phone"]
+    whatsapp_token = config["whatsapp_access_token"]
+    whatsapp_phone_id = config["whatsapp_phone_id"]
+
+    if not whatsapp_token or not whatsapp_phone_id or not owner_phone:
+        logger.warning("WhatsApp failure briefing skipped: missing WhatsApp token, phone ID, or owner phone.")
+        return
+
+    failure_lines = _summarize_platform_failures(publish_results)
+    if not failure_lines:
+        failure_lines = [str(publish_results.get("message") or "Publishing failed.").strip()]
+
+    url = f"https://graph.facebook.com/v22.0/{whatsapp_phone_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {whatsapp_token}",
+        "Content-Type": "application/json"
+    }
+    title = "Scheduled Publish Failed" if scheduled_job else "Publish Failed"
+    draft_label = str(draft_name or topic or "Untitled").strip()
+    text = (
+        f"{title} 🔴\n\n"
+        f"Client: {client_name.replace('_', ' ').title()}\n"
+        f"Draft: {draft_label}\n"
+        f"Summary: {str(publish_results.get('message') or 'Publishing failed.').strip()}\n\n"
+        f"Platform Errors:\n" + "\n".join(f"- {line}" for line in failure_lines[:3])
+    )
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": owner_phone,
+        "type": "text",
+        "text": {"body": text[:1500]}
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=(10, 30))
+        if resp.status_code != 200:
+            logger.warning(f"WhatsApp failure briefing API returned {resp.status_code}: {resp.text[:200]}")
+        else:
+            logger.info(f"WhatsApp failure briefing sent to {owner_phone}")
+    except Exception as e:
+        logger.warning(f"WhatsApp failure briefing failed: {e}")
 
 # Silence the Agents SDK logger if needed, keep our local pipeline log clean
 # Silence the Agents SDK logger if needed, keep our local pipeline log clean
@@ -251,15 +342,26 @@ def main():
         print(f"PIPELINE_MESSAGE: {publish_results.get('message')}")
     
     if publish_results.get("status") == "error":
+        failure_reason = build_failure_reason(publish_results)
         if args.job_id:
             try:
-                matched, _ = mark_job_failed(args.job_id, reason=str(publish_results.get("message") or "Publishing failed.").strip()[:500])
+                matched, _ = mark_job_failed(args.job_id, reason=failure_reason)
                 if matched:
                     logger.info(f"Marked job '{args.job_id}' as failed after publish error.")
                 else:
                     logger.warning(f"Job '{args.job_id}' not found when trying to mark as failed.")
             except Exception as e:
                 logger.warning(f"Failed to flag publish failure for job '{args.job_id}': {e}")
+        try:
+            send_owner_failure_briefing(
+                args.client,
+                args.topic,
+                publish_results,
+                draft_name=args.draft_name,
+                scheduled_job=bool(args.job_id),
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to send owner publish-failure briefing: {exc}")
         print(f"\n=> Global Note: {publish_results.get('message', 'Failure encountered.')}")
         print("="*60 + "\n")
         sys.exit(1)

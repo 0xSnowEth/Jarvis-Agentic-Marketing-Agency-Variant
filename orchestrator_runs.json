@@ -1,0 +1,763 @@
+{
+    "834e9eb2-00df-4ccb-94b9-04b0fcc0fb32": {
+        "run_id": "834e9eb2-00df-4ccb-94b9-04b0fcc0fb32",
+        "action": "mixed",
+        "status": "completed",
+        "created_at": "2026-04-11T13:30:34.210590+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 2,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 1,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 1,
+            "scheduled_complete": 1,
+            "approval_ready": 0,
+            "approval_sent_whatsapp": 0,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::28a458b8-8b58-4ad3-8cbe-b023d8bc880f",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "Burger squad",
+                "draft_id": "28a458b8-8b58-4ad3-8cbe-b023d8bc880f",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "post_now",
+                "schedule": {
+                    "scheduled_date": "",
+                    "time": ""
+                },
+                "status": "published",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · Burger squad",
+                "source_text": "please post @[Bakhourito] draft_id:\"28a458b8-8b58-4ad3-8cbe-b023d8bc880f\" draft:\"Burger squad\" NOW",
+                "phase": "Publishing",
+                "message": "Pipeline completed successfully for Bakhourito. Facebook published (ID: 118407909550805_974243698287110) Instagram published (ID: 18080367662626975)",
+                "result": {
+                    "status": "success",
+                    "message": "Pipeline completed successfully for Bakhourito. Facebook published (ID: 118407909550805_974243698287110) Instagram published (ID: 18080367662626975)",
+                    "output": "08,101 - INFO - Polling attempt 1: Status is FINISHED\n2026-04-11 21:31:08,101 - INFO - Container 18080290637148309 finished. Publishing to feed.\n2026-04-11 21:31:11,248 - INFO - Instagram publish response: {'id': '18080367662626975'}\n2026-04-11 21:31:11,547 - INFO - HTTP Request: GET https://gqlsdsprvjcqfycalgex.supabase.co/rest/v1/creative_drafts?select=%2A&client_id=eq.Bakhourito&draft_name=eq.Burger+squad&limit=1 \"HTTP/2 200 OK\"\n2026-04-11 21:31:11,725 - INFO - HTTP Request: POST https://gqlsdsprvjcqfycalgex.supabase.co/rest/v1/publish_runs \"HTTP/2 201 Created\"\n2026-04-11 21:31:11,726 - INFO - Publish run persisted to active backend.\n2026-04-11 21:31:12,464 - WARNING - WhatsApp briefing API returned 401: {\"error\":{\"message\":\"Error validating access token: Session has expired on Friday, 10-Apr-26 08:00:00 PDT. The current time is Saturday, 11-Apr-26 06:31:12 PDT.\",\"type\":\"OAuthException\",\"code\":190,\"er\n2026-04-11 21:31:12,583 - INFO - HTTP Request: GET https://gqlsdsprvjcqfycalgex.supabase.co/rest/v1/creative_drafts?select=%2A&client_id=eq.Bakhourito&draft_name=eq.Burger+squad&limit=1 \"HTTP/2 200 OK\"\n2026-04-11 21:31:12,744 - INFO - HTTP Request: DELETE https://gqlsdsprvjcqfycalgex.supabase.co/rest/v1/creative_drafts?client_id=eq.Bakhourito&draft_name=eq.Burger+squad \"HTTP/2 200 OK\"\n2026-04-11 21:31:12,745 - INFO - Cleared published draft 'Burger squad' from the creative queue.\n2026-04-11 21:31:12,745 - INFO - Skipping schedule delivery mark because no job_id was provided.\n"
+                },
+                "completed_at": "2026-04-11T13:31:15.621958+00:00"
+            },
+            {
+                "item_id": "Bakhourito::d17a7302-9391-4845-852d-ac10861446c2",
+                "index": 2,
+                "client_id": "Bakhourito",
+                "draft_name": "Oudie",
+                "draft_id": "d17a7302-9391-4845-852d-ac10861446c2",
+                "media_kind": "image_single",
+                "asset_count": 1,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-11",
+                    "time": "09:34 PM"
+                },
+                "status": "scheduled",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · Oudie",
+                "source_text": "schedule @[Bakhourito] draft_id:\"d17a7302-9391-4845-852d-ac10861446c2\" draft:\"Oudie\" today for it to be posted by 9:34 PM",
+                "phase": "Scheduling",
+                "message": "Successfully queued 'Highlight Handcrafted oud oils in a clean premium way and make Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally. want to act on it today.' for Bakhourito at Saturday, April 11 at 09:34 PM as job 3ed05e1cf374.",
+                "result": {
+                    "status": "success",
+                    "message": "Successfully queued 'Highlight Handcrafted oud oils in a clean premium way and make Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally. want to act on it today.' for Bakhourito at Saturday, April 11 at 09:34 PM as job 3ed05e1cf374.",
+                    "job_id": "3ed05e1cf374"
+                },
+                "job_id": "3ed05e1cf374",
+                "completed_at": "2026-04-11T13:31:20.193330+00:00"
+            }
+        ],
+        "request_id": "d47cfb13f79f4f2fb9a9c571dbd99598",
+        "updated_at": "2026-04-11T13:31:20.883245+00:00",
+        "started_at": "2026-04-11T13:30:34.672854+00:00",
+        "completed_at": "2026-04-11T13:31:20.602419+00:00"
+    },
+    "73820068-d7c2-4535-a6a3-1160e256a131": {
+        "run_id": "73820068-d7c2-4535-a6a3-1160e256a131",
+        "action": "schedule",
+        "status": "completed",
+        "created_at": "2026-04-12T04:26:26.570306+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 1,
+            "approval_ready": 0,
+            "approval_sent_whatsapp": 0,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::adf73c96-49ae-4e33-b606-4cb40b6da5f4",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "burger TOWN",
+                "draft_id": "adf73c96-49ae-4e33-b606-4cb40b6da5f4",
+                "media_kind": "image_carousel",
+                "asset_count": 3,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "08:00 PM"
+                },
+                "status": "scheduled",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · burger TOWN",
+                "source_text": "i want to schedule @[Bakhourito] draft_id:\"adf73c96-49ae-4e33-b606-4cb40b6da5f4\" draft:\"burger TOWN\" to be posted today at 8:00 PM",
+                "phase": "Scheduling",
+                "message": "Successfully queued 'burger TOWN spotlight' for Bakhourito at Sunday, April 12 at 08:00 PM as job bf5783d266bf.",
+                "result": {
+                    "status": "success",
+                    "message": "Successfully queued 'burger TOWN spotlight' for Bakhourito at Sunday, April 12 at 08:00 PM as job bf5783d266bf.",
+                    "job_id": "bf5783d266bf"
+                },
+                "job_id": "bf5783d266bf",
+                "completed_at": "2026-04-12T04:26:31.230646+00:00"
+            }
+        ],
+        "request_id": "a82c0e1bc42e4500be25f10c853e9b15",
+        "updated_at": "2026-04-12T04:26:32.122701+00:00",
+        "started_at": "2026-04-12T04:26:26.992274+00:00",
+        "completed_at": "2026-04-12T04:26:31.725801+00:00"
+    },
+    "eb1bd4ba-c6ea-4c70-88a6-4197e41a2a7e": {
+        "run_id": "eb1bd4ba-c6ea-4c70-88a6-4197e41a2a7e",
+        "action": "schedule",
+        "status": "failed",
+        "created_at": "2026-04-12T09:29:06.280935+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 0,
+            "approval_ready": 0,
+            "approval_sent_whatsapp": 0,
+            "failed": 1
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::324f313d-75f7-449e-99d0-20772445e3fa",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "ayee",
+                "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "05:32 PM"
+                },
+                "status": "failed",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · ayee",
+                "source_text": "Please schedule @[Bakhourito] draft_id:\"324f313d-75f7-449e-99d0-20772445e3fa\" draft:\"ayee\" to be posted today at 5:32 PM",
+                "phase": "Routing Approval",
+                "message": "Server disconnected",
+                "result": {
+                    "error": "Server disconnected"
+                },
+                "completed_at": "2026-04-12T09:29:11.939081+00:00"
+            }
+        ],
+        "request_id": "039e448b132a4c3ca2be5fd319b6f2a5",
+        "updated_at": "2026-04-12T09:29:12.602645+00:00",
+        "started_at": "2026-04-12T09:29:06.885446+00:00",
+        "completed_at": "2026-04-12T09:29:12.334896+00:00"
+    },
+    "2ba86411-36fb-4584-9e71-0202c5bc8a07": {
+        "run_id": "2ba86411-36fb-4584-9e71-0202c5bc8a07",
+        "action": "schedule",
+        "status": "completed",
+        "created_at": "2026-04-12T12:43:04.514976+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 0,
+            "approval_ready": 1,
+            "approval_sent_whatsapp": 0,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::324f313d-75f7-449e-99d0-20772445e3fa",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "ayee",
+                "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "08:45 PM"
+                },
+                "status": "approval_ready",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · ayee",
+                "source_text": "Please schedule @[Bakhourito] draft_id:\"324f313d-75f7-449e-99d0-20772445e3fa\" draft:\"ayee\" to be posted today at 8:45 PM",
+                "phase": "Routing Approval",
+                "message": "Approval 5BB9D020 is ready in Jarvis, but WhatsApp send failed: The WhatsApp 24-hour reply window is closed for this number. Ask the owner to send any WhatsApp message first, then try again.",
+                "result": {
+                    "status": "partial_success",
+                    "message": "Approval 5BB9D020 is ready in Jarvis, but WhatsApp send failed: The WhatsApp 24-hour reply window is closed for this number. Ask the owner to send any WhatsApp message first, then try again.",
+                    "approval_id": "5BB9D020",
+                    "job_id": "3f3ca0bc7583",
+                    "whatsapp_sent": false,
+                    "job": {
+                        "days": [
+                            "Sunday"
+                        ],
+                        "time": "08:45 PM",
+                        "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                        "client": "Bakhourito",
+                        "images": [
+                            "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                            "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                        ],
+                        "job_id": "3f3ca0bc7583",
+                        "status": "pending_approval",
+                        "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                        "hashtags": [
+                            "#BakhoorNights",
+                            "#HandcraftedOud",
+                            "#LuxuryFragrance",
+                            "#CulturalElegance",
+                            "#OudExperience"
+                        ],
+                        "draft_name": "ayee",
+                        "media_kind": "image_carousel",
+                        "approval_id": "5BB9D020",
+                        "caption_mode": "ai",
+                        "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                        "whatsapp_sent": false,
+                        "caption_status": "ready",
+                        "scheduled_date": "2026-04-12",
+                        "approval_routing": "whatsapp_only",
+                        "seo_keyword_used": "handcrafted oud oils"
+                    }
+                },
+                "approval_id": "5BB9D020",
+                "job_id": "3f3ca0bc7583",
+                "job": {
+                    "days": [
+                        "Sunday"
+                    ],
+                    "time": "08:45 PM",
+                    "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                    "client": "Bakhourito",
+                    "images": [
+                        "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                        "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                    ],
+                    "job_id": "3f3ca0bc7583",
+                    "status": "pending_approval",
+                    "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                    "hashtags": [
+                        "#BakhoorNights",
+                        "#HandcraftedOud",
+                        "#LuxuryFragrance",
+                        "#CulturalElegance",
+                        "#OudExperience"
+                    ],
+                    "draft_name": "ayee",
+                    "media_kind": "image_carousel",
+                    "approval_id": "5BB9D020",
+                    "caption_mode": "ai",
+                    "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                    "whatsapp_sent": false,
+                    "caption_status": "ready",
+                    "scheduled_date": "2026-04-12",
+                    "approval_routing": "whatsapp_only",
+                    "seo_keyword_used": "handcrafted oud oils"
+                },
+                "whatsapp_sent": false,
+                "completed_at": "2026-04-12T12:43:10.765145+00:00"
+            }
+        ],
+        "request_id": "2550d387e50b4daf8ecaebc384132ecd",
+        "updated_at": "2026-04-12T12:43:11.490304+00:00",
+        "started_at": "2026-04-12T12:43:05.777116+00:00",
+        "completed_at": "2026-04-12T12:43:11.197118+00:00"
+    },
+    "4c621d2d-9e9a-41e4-898c-53b3df536615": {
+        "run_id": "4c621d2d-9e9a-41e4-898c-53b3df536615",
+        "action": "schedule",
+        "status": "completed",
+        "created_at": "2026-04-12T12:44:42.188912+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 0,
+            "approval_ready": 1,
+            "approval_sent_whatsapp": 0,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::324f313d-75f7-449e-99d0-20772445e3fa",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "ayee",
+                "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "08:48 PM"
+                },
+                "status": "approval_ready",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · ayee",
+                "source_text": "Please schedule @[Bakhourito] draft_id:\"324f313d-75f7-449e-99d0-20772445e3fa\" draft:\"ayee\" to be posted today at 8:48 PM",
+                "phase": "Routing Approval",
+                "message": "Approval DB2D1E75 is ready in Jarvis, but WhatsApp send failed: The WhatsApp 24-hour reply window is closed for this number. Ask the owner to send any WhatsApp message first, then try again.",
+                "result": {
+                    "status": "partial_success",
+                    "message": "Approval DB2D1E75 is ready in Jarvis, but WhatsApp send failed: The WhatsApp 24-hour reply window is closed for this number. Ask the owner to send any WhatsApp message first, then try again.",
+                    "approval_id": "DB2D1E75",
+                    "job_id": "44167b89ee5a",
+                    "whatsapp_sent": false,
+                    "job": {
+                        "days": [
+                            "Sunday"
+                        ],
+                        "time": "08:48 PM",
+                        "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                        "client": "Bakhourito",
+                        "images": [
+                            "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                            "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                        ],
+                        "job_id": "44167b89ee5a",
+                        "status": "pending_approval",
+                        "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                        "hashtags": [
+                            "#BakhoorNights",
+                            "#HandcraftedOud",
+                            "#LuxuryFragrance",
+                            "#CulturalElegance",
+                            "#OudExperience"
+                        ],
+                        "draft_name": "ayee",
+                        "media_kind": "image_carousel",
+                        "approval_id": "DB2D1E75",
+                        "caption_mode": "ai",
+                        "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                        "whatsapp_sent": false,
+                        "caption_status": "ready",
+                        "scheduled_date": "2026-04-12",
+                        "approval_routing": "whatsapp_only",
+                        "seo_keyword_used": "handcrafted oud oils"
+                    }
+                },
+                "approval_id": "DB2D1E75",
+                "job_id": "44167b89ee5a",
+                "job": {
+                    "days": [
+                        "Sunday"
+                    ],
+                    "time": "08:48 PM",
+                    "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                    "client": "Bakhourito",
+                    "images": [
+                        "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                        "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                    ],
+                    "job_id": "44167b89ee5a",
+                    "status": "pending_approval",
+                    "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                    "hashtags": [
+                        "#BakhoorNights",
+                        "#HandcraftedOud",
+                        "#LuxuryFragrance",
+                        "#CulturalElegance",
+                        "#OudExperience"
+                    ],
+                    "draft_name": "ayee",
+                    "media_kind": "image_carousel",
+                    "approval_id": "DB2D1E75",
+                    "caption_mode": "ai",
+                    "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                    "whatsapp_sent": false,
+                    "caption_status": "ready",
+                    "scheduled_date": "2026-04-12",
+                    "approval_routing": "whatsapp_only",
+                    "seo_keyword_used": "handcrafted oud oils"
+                },
+                "whatsapp_sent": false,
+                "completed_at": "2026-04-12T12:44:48.572324+00:00"
+            }
+        ],
+        "request_id": "e6af33f631cf4d078968436fec520b90",
+        "updated_at": "2026-04-12T12:44:49.333543+00:00",
+        "started_at": "2026-04-12T12:44:42.597382+00:00",
+        "completed_at": "2026-04-12T12:44:49.026130+00:00"
+    },
+    "2ddbcefe-000f-4b84-b7bd-cf6886329533": {
+        "run_id": "2ddbcefe-000f-4b84-b7bd-cf6886329533",
+        "action": "schedule",
+        "status": "completed",
+        "created_at": "2026-04-12T13:57:36.176580+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 0,
+            "approval_ready": 0,
+            "approval_sent_whatsapp": 1,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::324f313d-75f7-449e-99d0-20772445e3fa",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "ayee",
+                "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "10:00 PM"
+                },
+                "status": "approval_sent_whatsapp",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · ayee",
+                "source_text": "Please schedule @[Bakhourito] draft_id:\"324f313d-75f7-449e-99d0-20772445e3fa\" draft:\"ayee\" to be posted today at 10:00 PM",
+                "phase": "Routing Approval",
+                "message": "Draft prepared. Sent approval card 77F39B6B to the agency owner's WhatsApp mobile control lane.",
+                "result": {
+                    "status": "success",
+                    "message": "Draft prepared. Sent approval card 77F39B6B to the agency owner's WhatsApp mobile control lane.",
+                    "approval_id": "77F39B6B",
+                    "job_id": "ee15fcb02f07",
+                    "whatsapp_sent": true,
+                    "job": {
+                        "days": [
+                            "Sunday"
+                        ],
+                        "time": "10:00 PM",
+                        "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                        "client": "Bakhourito",
+                        "images": [
+                            "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                            "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                        ],
+                        "job_id": "ee15fcb02f07",
+                        "status": "pending_approval",
+                        "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                        "hashtags": [
+                            "#BakhoorNights",
+                            "#HandcraftedOud",
+                            "#LuxuryFragrance",
+                            "#CulturalElegance",
+                            "#OudExperience"
+                        ],
+                        "draft_name": "ayee",
+                        "media_kind": "image_carousel",
+                        "approval_id": "77F39B6B",
+                        "caption_mode": "ai",
+                        "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                        "whatsapp_sent": true,
+                        "caption_status": "ready",
+                        "scheduled_date": "2026-04-12",
+                        "approval_routing": "whatsapp_only",
+                        "seo_keyword_used": "handcrafted oud oils",
+                        "whatsapp_last_sent_at": "2026-04-12T21:57:39"
+                    }
+                },
+                "approval_id": "77F39B6B",
+                "job_id": "ee15fcb02f07",
+                "job": {
+                    "days": [
+                        "Sunday"
+                    ],
+                    "time": "10:00 PM",
+                    "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                    "client": "Bakhourito",
+                    "images": [
+                        "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                        "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                    ],
+                    "job_id": "ee15fcb02f07",
+                    "status": "pending_approval",
+                    "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                    "hashtags": [
+                        "#BakhoorNights",
+                        "#HandcraftedOud",
+                        "#LuxuryFragrance",
+                        "#CulturalElegance",
+                        "#OudExperience"
+                    ],
+                    "draft_name": "ayee",
+                    "media_kind": "image_carousel",
+                    "approval_id": "77F39B6B",
+                    "caption_mode": "ai",
+                    "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                    "whatsapp_sent": true,
+                    "caption_status": "ready",
+                    "scheduled_date": "2026-04-12",
+                    "approval_routing": "whatsapp_only",
+                    "seo_keyword_used": "handcrafted oud oils",
+                    "whatsapp_last_sent_at": "2026-04-12T21:57:39"
+                },
+                "whatsapp_sent": true,
+                "completed_at": "2026-04-12T13:57:41.944531+00:00"
+            }
+        ],
+        "request_id": "567c5734ab814dc59959aee4f056ba46",
+        "updated_at": "2026-04-12T13:57:42.572369+00:00",
+        "started_at": "2026-04-12T13:57:36.756073+00:00",
+        "completed_at": "2026-04-12T13:57:42.320798+00:00"
+    },
+    "e7bb1235-ec68-4277-8e98-5cb84626769b": {
+        "run_id": "e7bb1235-ec68-4277-8e98-5cb84626769b",
+        "action": "schedule",
+        "status": "completed",
+        "created_at": "2026-04-12T14:03:45.665784+00:00",
+        "schedule": {},
+        "approval_routing_override": "",
+        "warnings": [],
+        "totals": {
+            "total": 1,
+            "ready": 0,
+            "blocked": 0,
+            "post_now": 0,
+            "schedule": 1,
+            "send_for_approval": 0,
+            "queued": 0,
+            "preflight": 0,
+            "publishing": 0,
+            "published": 0,
+            "scheduled_complete": 0,
+            "approval_ready": 0,
+            "approval_sent_whatsapp": 1,
+            "failed": 0
+        },
+        "items": [
+            {
+                "item_id": "Bakhourito::324f313d-75f7-449e-99d0-20772445e3fa",
+                "index": 1,
+                "client_id": "Bakhourito",
+                "draft_name": "ayee",
+                "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                "media_kind": "image_carousel",
+                "asset_count": 2,
+                "platforms": [
+                    "facebook",
+                    "instagram"
+                ],
+                "platform_label": "Facebook + Instagram",
+                "action": "schedule",
+                "schedule": {
+                    "scheduled_date": "2026-04-12",
+                    "time": "10:06 PM"
+                },
+                "status": "approval_sent_whatsapp",
+                "warning": "",
+                "preflight_warnings": [],
+                "has_media_warnings": false,
+                "summary": "Bakhourito · ayee",
+                "source_text": "Please schedule @[Bakhourito] draft_id:\"324f313d-75f7-449e-99d0-20772445e3fa\" draft:\"ayee\" to be posted today at 10:06 PM",
+                "phase": "Routing Approval",
+                "message": "Draft prepared. Sent approval card F07C5AED to the agency owner's WhatsApp mobile control lane.",
+                "result": {
+                    "status": "success",
+                    "message": "Draft prepared. Sent approval card F07C5AED to the agency owner's WhatsApp mobile control lane.",
+                    "approval_id": "F07C5AED",
+                    "job_id": "f7a5fd11d82c",
+                    "whatsapp_sent": true,
+                    "job": {
+                        "days": [
+                            "Sunday"
+                        ],
+                        "time": "10:06 PM",
+                        "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                        "client": "Bakhourito",
+                        "images": [
+                            "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                            "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                        ],
+                        "job_id": "f7a5fd11d82c",
+                        "status": "pending_approval",
+                        "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                        "hashtags": [
+                            "#BakhoorNights",
+                            "#HandcraftedOud",
+                            "#LuxuryFragrance",
+                            "#CulturalElegance",
+                            "#OudExperience"
+                        ],
+                        "draft_name": "ayee",
+                        "media_kind": "image_carousel",
+                        "approval_id": "F07C5AED",
+                        "caption_mode": "ai",
+                        "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                        "whatsapp_sent": true,
+                        "caption_status": "ready",
+                        "scheduled_date": "2026-04-12",
+                        "approval_routing": "whatsapp_only",
+                        "seo_keyword_used": "handcrafted oud oils",
+                        "whatsapp_last_sent_at": "2026-04-12T22:03:50"
+                    }
+                },
+                "approval_id": "F07C5AED",
+                "job_id": "f7a5fd11d82c",
+                "job": {
+                    "days": [
+                        "Sunday"
+                    ],
+                    "time": "10:06 PM",
+                    "topic": "Showcase Handcrafted oud oils clearly across the carousel and make it feel worth choosing for Affluent Arab men and women aged 25–45 who appreciate traditional Gulf heritage, luxury gifting, and authentic oud experiences. Also targeting diaspora communities and fragrance enthusiasts globally..",
+                    "client": "Bakhourito",
+                    "images": [
+                        "assets/Bakhourito/pexels-soft__work__-1913651507-35658144.jpg",
+                        "assets/Bakhourito/eiliv-aceron-pu6b4yIlQF4-unsplash_with_bgc-2.jpg"
+                    ],
+                    "job_id": "f7a5fd11d82c",
+                    "status": "pending_approval",
+                    "draft_id": "324f313d-75f7-449e-99d0-20772445e3fa",
+                    "hashtags": [
+                        "#BakhoorNights",
+                        "#HandcraftedOud",
+                        "#LuxuryFragrance",
+                        "#CulturalElegance",
+                        "#OudExperience"
+                    ],
+                    "draft_name": "ayee",
+                    "media_kind": "image_carousel",
+                    "approval_id": "F07C5AED",
+                    "caption_mode": "ai",
+                    "caption_text": "Experience the essence of the Gulf with our handcrafted oud oils. Each bottle is a tribute to tradition, perfect for those who appreciate luxury and authenticity. Ideal for gifting or personal indulgence, our oils invite you to celebrate every moment with a scent that resonates deeply. Explore the rich heritage of oud today.",
+                    "whatsapp_sent": true,
+                    "caption_status": "ready",
+                    "scheduled_date": "2026-04-12",
+                    "approval_routing": "whatsapp_only",
+                    "seo_keyword_used": "handcrafted oud oils",
+                    "whatsapp_last_sent_at": "2026-04-12T22:03:50"
+                },
+                "whatsapp_sent": true,
+                "completed_at": "2026-04-12T14:03:50.746754+00:00"
+            }
+        ],
+        "request_id": "b576264748f94001b7c42eae9fdf5cf2",
+        "updated_at": "2026-04-12T14:03:51.439795+00:00",
+        "started_at": "2026-04-12T14:03:47.007844+00:00",
+        "completed_at": "2026-04-12T14:03:51.171184+00:00"
+    }
+}

@@ -21,6 +21,12 @@ create table if not exists client_brand_profiles (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists client_trend_dossiers (
+  client_id text primary key references clients(client_id) on delete cascade,
+  dossier jsonb not null default '{}'::jsonb,
+  built_at timestamptz not null default now()
+);
+
 create table if not exists assets (
   asset_id uuid primary key default gen_random_uuid(),
   client_id text not null references clients(client_id) on delete cascade,
@@ -92,6 +98,18 @@ create table if not exists publish_runs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists strategy_plans (
+  plan_id text primary key,
+  client_id text not null references clients(client_id) on delete cascade,
+  window_name text not null default 'next_7_days',
+  status text not null default 'ready',
+  summary text,
+  materialized_at timestamptz,
+  payload_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists auth_sessions (
   session_token text primary key,
   expires_at timestamptz not null,
@@ -116,6 +134,12 @@ create table if not exists reschedule_sessions (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists operator_sessions (
+  phone text primary key,
+  payload_json jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists operator_audit_events (
   event_id uuid primary key default gen_random_uuid(),
   event_type text not null,
@@ -127,15 +151,19 @@ create table if not exists operator_audit_events (
 
 create index if not exists idx_assets_client_id on assets(client_id);
 create unique index if not exists idx_assets_client_filename on assets(client_id, original_filename);
+create index if not exists idx_client_trend_dossiers_built_at on client_trend_dossiers(built_at);
 create index if not exists idx_drafts_client_id on creative_drafts(client_id);
 create index if not exists idx_schedule_jobs_client_id on schedule_jobs(client_id);
 create index if not exists idx_schedule_jobs_scheduled_date on schedule_jobs(scheduled_date);
 create index if not exists idx_schedule_jobs_status on schedule_jobs(status);
 create index if not exists idx_approval_requests_client_id on approval_requests(client_id);
 create index if not exists idx_publish_runs_client_id on publish_runs(client_id);
+create index if not exists idx_strategy_plans_client_id on strategy_plans(client_id);
+create index if not exists idx_strategy_plans_updated_at on strategy_plans(updated_at);
 create index if not exists idx_auth_sessions_expires_at on auth_sessions(expires_at);
 create index if not exists idx_orchestrator_runs_status on orchestrator_runs(status);
 create index if not exists idx_orchestrator_runs_updated_at on orchestrator_runs(updated_at);
+create index if not exists idx_operator_sessions_updated_at on operator_sessions(updated_at);
 create index if not exists idx_operator_audit_events_type on operator_audit_events(event_type);
 create index if not exists idx_operator_audit_events_created_at on operator_audit_events(created_at);
 

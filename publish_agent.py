@@ -10,7 +10,7 @@ from typing import Dict, Any
 from urllib.parse import quote, urlparse
 from dotenv import load_dotenv
 from client_store import get_client_store
-from asset_store import get_asset_content, get_client_asset_record, repair_client_asset_for_meta
+from asset_store import get_asset_content, get_client_asset_record, get_asset_store, repair_client_asset_for_meta
 from queue_store import normalize_hashtag_list
 
 load_dotenv()
@@ -166,32 +166,27 @@ class PublishAgent:
 
         data_backend = os.getenv("JARVIS_DATA_BACKEND", "json").strip().lower()
         if data_backend == "supabase":
-            bucket = str(os.getenv("SUPABASE_ASSET_BUCKET") or "client-assets").strip()
-            if bucket:
-                try:
-                    from client_store import get_supabase_service_client
-                    client = get_supabase_service_client()
-                    
-                    def _supabase_path(p: str) -> str:
-                        cp = p.replace("\\", "/").lstrip("/")
-                        if cp.startswith("assets/"): cp = cp[7:]
-                        
-                        # CRITICAL FIX for Instagram API "media type" rejection:
-                        # Instagram's Graph API frequently rejects Supabase signed URLs because it 
-                        # gets confused by the ?token= query parameters and strips the file extensions.
-                        # To resolve this, we ensure the bucket is completely public and return the native 
-                        # clean URL directly from the Supabase CDN.
-                        # Note: The database MUST be configured with public: true for this bucket.
-                            
-                        supabase_url = str(os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-                        base_public_url = f"{supabase_url}/storage/v1/object/public/{bucket}"
-                        return f"{base_public_url}/{quote(cp, safe='/')}"
+            try:
+                store = get_asset_store()
 
-                    image_urls = [_supabase_path(p) for p in image_paths]
-                    video_urls = [_supabase_path(p) for p in video_paths]
-                    return image_urls, video_urls, str(os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
-                except Exception as e:
-                    logger.error(f"Failed to generate Supabase signed URLs: {e}")
+                def _supabase_path(p: str) -> str:
+                    managed = self._parse_managed_asset_path(p)
+                    if managed:
+                        client_id, filename = managed
+                        return str(store.public_asset_url(client_id, filename) or "").strip()
+                    cp = p.replace("\\", "/").lstrip("/")
+                    if cp.startswith("assets/"):
+                        cp = cp[7:]
+                    supabase_url = str(os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+                    bucket = str(os.getenv("SUPABASE_ASSET_BUCKET") or "client-assets").strip()
+                    base_public_url = f"{supabase_url}/storage/v1/object/public/{bucket}"
+                    return f"{base_public_url}/{quote(cp, safe='/')}"
+
+                image_urls = [_supabase_path(p) for p in image_paths]
+                video_urls = [_supabase_path(p) for p in video_paths]
+                return image_urls, video_urls, str(os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+            except Exception as e:
+                logger.error(f"Failed to generate Supabase public URLs: {e}")
 
         tunnel = os.getenv("WEBHOOK_PROXY_URL", "").strip().rstrip("/")
         if not tunnel:
@@ -217,7 +212,7 @@ class PublishAgent:
         if not current_host:
             return ""
 
-        if "trycloudflare.com" in current_host or current_host.endswith("supabase.co"):
+        if "trycloudflare.com" in current_host:
             return (
                 f"Instagram image publishing is blocked on the current temporary media host ({current_host}). "
                 "Facebook image publishing can still proceed. "
@@ -305,7 +300,7 @@ class PublishAgent:
         if mirror_mode == "catbox":
             should_mirror = True
         elif mirror_mode == "auto":
-            should_mirror = ("trycloudflare.com" in normalized_host) or normalized_host.endswith("supabase.co")
+            should_mirror = "trycloudflare.com" in normalized_host
 
         if not should_mirror:
             return image_urls, ""
@@ -319,6 +314,24 @@ class PublishAgent:
                 f"Instagram image publishing is blocked on the current temporary media host ({current_host}), "
                 f"and Jarvis could not mirror the image to the demo fallback host: {exc}"
             )
+
+    def _validate_managed_media_paths(self, image_paths: list[str], video_paths: list[str]) -> str:
+        missing: list[str] = []
+        for media_path in [*(image_paths or []), *(video_paths or [])]:
+            managed = self._parse_managed_asset_path(media_path)
+            if not managed:
+                continue
+            client_id, filename = managed
+            asset = get_client_asset_record(client_id, filename)
+            if not asset:
+                missing.append(filename)
+        if missing:
+            sample = ", ".join(missing[:3])
+            return (
+                "Jarvis cannot publish this draft because one or more selected vault assets are missing from storage: "
+                f"{sample}. Reopen the draft, remove the missing asset, and save it again."
+            )
+        return ""
 
     def _prepare_instagram_video_urls(self, video_paths: list[str], video_urls: list[str], current_host: str) -> tuple[list[str], str]:
         if not video_paths or not video_urls:
@@ -638,6 +651,10 @@ class PublishAgent:
             return {"status": "error", "message": "Only a single video is supported per post in this version."}
         if not image_urls and not video_urls:
             return {"status": "error", "message": "No media assets were provided for publish."}
+
+        missing_media_error = self._validate_managed_media_paths(images, videos)
+        if missing_media_error:
+            return {"status": "error", "message": missing_media_error}
 
         if not access_token:
             logger.error("Missing META_ACCESS_TOKEN.")

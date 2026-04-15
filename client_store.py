@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from dotenv import load_dotenv
@@ -35,6 +36,12 @@ class BaseClientStore:
     def get_brand_profile(self, client_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    def save_trend_dossier(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def get_trend_dossier(self, client_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     def delete_client(self, client_id: str) -> None:
         raise NotImplementedError
 
@@ -46,14 +53,19 @@ class JsonClientStore(BaseClientStore):
         self.base_dir = base_dir or os.getcwd()
         self.clients_dir = os.path.join(self.base_dir, "clients")
         self.brands_dir = os.path.join(self.base_dir, "brands")
+        self.assets_dir = os.path.join(self.base_dir, "assets")
         os.makedirs(self.clients_dir, exist_ok=True)
         os.makedirs(self.brands_dir, exist_ok=True)
+        os.makedirs(self.assets_dir, exist_ok=True)
 
     def _client_path(self, client_id: str) -> str:
         return os.path.join(self.clients_dir, f"{client_id}.json")
 
     def _brand_path(self, client_id: str) -> str:
         return os.path.join(self.brands_dir, f"{client_id}.json")
+
+    def _trend_dossier_path(self, client_id: str) -> str:
+        return os.path.join(self.assets_dir, client_id, "trend_dossier.json")
 
     def list_client_ids(self) -> list[str]:
         if not os.path.exists(self.clients_dir):
@@ -98,8 +110,22 @@ class JsonClientStore(BaseClientStore):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    def save_trend_dossier(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        path = self._trend_dossier_path(client_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=4, ensure_ascii=False)
+        return payload
+
+    def get_trend_dossier(self, client_id: str) -> dict[str, Any] | None:
+        path = self._trend_dossier_path(client_id)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
     def delete_client(self, client_id: str) -> None:
-        for path in (self._client_path(client_id), self._brand_path(client_id)):
+        for path in (self._client_path(client_id), self._brand_path(client_id), self._trend_dossier_path(client_id)):
             if os.path.exists(path):
                 os.remove(path)
 
@@ -160,7 +186,43 @@ class SupabaseClientStore(BaseClientStore):
             return None
         return rows[0].get("brand_json")
 
+    def save_trend_dossier(self, client_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        row = {
+            "client_id": client_id,
+            "dossier": payload,
+            "built_at": str(
+                payload.get("built_at")
+                or payload.get("fetched_at")
+                or datetime.now(timezone.utc).isoformat()
+            ).strip(),
+        }
+        self.client.table("client_trend_dossiers").upsert(row, on_conflict="client_id").execute()
+        saved = dict(payload)
+        if not str(saved.get("built_at") or "").strip():
+            saved["built_at"] = row["built_at"]
+        return saved
+
+    def get_trend_dossier(self, client_id: str) -> dict[str, Any] | None:
+        response = (
+            self.client.table("client_trend_dossiers")
+            .select("dossier,built_at")
+            .eq("client_id", client_id)
+            .limit(1)
+            .execute()
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        dossier = rows[0].get("dossier")
+        if not isinstance(dossier, dict):
+            return None
+        payload = dict(dossier)
+        if not str(payload.get("built_at") or "").strip():
+            payload["built_at"] = str(rows[0].get("built_at") or "").strip()
+        return payload
+
     def delete_client(self, client_id: str) -> None:
+        self.client.table("client_trend_dossiers").delete().eq("client_id", client_id).execute()
         self.client.table("client_brand_profiles").delete().eq("client_id", client_id).execute()
         self.client.table("clients").delete().eq("client_id", client_id).execute()
 

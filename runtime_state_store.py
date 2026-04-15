@@ -25,11 +25,89 @@ def _runtime_state_path(filename: str) -> str:
 AUTH_SESSIONS_PATH = _runtime_state_path("auth_sessions.json")
 ORCHESTRATOR_RUNS_PATH = _runtime_state_path("orchestrator_runs.json")
 RESCHEDULE_SESSIONS_PATH = _runtime_state_path("reschedule_sessions.json")
+OPERATOR_SESSIONS_PATH = _runtime_state_path("operator_sessions.json")
 AUDIT_EVENTS_PATH = _runtime_state_path("operator_audit_events.jsonl")
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_timestamp(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _orchestrator_status_rank(status: str) -> int:
+    normalized = str(status or "").strip().lower()
+    return {
+        "failed": 95,
+        "partial_success": 90,
+        "completed": 85,
+        "published": 80,
+        "scheduled": 78,
+        "approval_sent_whatsapp": 76,
+        "approval_ready": 74,
+        "completed_item": 72,
+        "publishing": 60,
+        "preflight": 45,
+        "queued": 30,
+        "blocked": 20,
+        "ready": 10,
+        "starting": 5,
+        "start_failed": 4,
+    }.get(normalized, 0)
+
+
+def _orchestrator_item_progress_score(run: dict[str, Any] | None) -> int:
+    items = list((run or {}).get("items") or [])
+    weights = {
+        "failed": 60,
+        "partial_success": 58,
+        "published": 55,
+        "scheduled": 50,
+        "approval_sent_whatsapp": 48,
+        "approval_ready": 46,
+        "completed": 44,
+        "publishing": 28,
+        "preflight": 18,
+        "queued": 10,
+        "blocked": 6,
+        "ready": 4,
+    }
+    return sum(weights.get(str((item or {}).get("status") or "").strip().lower(), 0) for item in items)
+
+
+def _orchestrator_run_sort_key(run: dict[str, Any] | None) -> tuple[int, int, float, float, int]:
+    payload = dict(run or {})
+    completed = 1 if payload.get("completed_at") or str(payload.get("status") or "").strip().lower() in {"completed", "failed", "partial_success"} else 0
+    status_rank = _orchestrator_status_rank(str(payload.get("status") or ""))
+    updated_at = max(
+        _parse_iso_timestamp(payload.get("updated_at")),
+        _parse_iso_timestamp(payload.get("completed_at")),
+        _parse_iso_timestamp(payload.get("started_at")),
+        _parse_iso_timestamp(payload.get("created_at")),
+    )
+    created_at = _parse_iso_timestamp(payload.get("created_at"))
+    progress = _orchestrator_item_progress_score(payload)
+    return (completed, status_rank, updated_at, created_at, progress)
+
+
+def _prefer_orchestrator_run(*candidates: dict[str, Any] | None) -> dict[str, Any] | None:
+    valid = [
+        dict(candidate)
+        for candidate in candidates
+        if isinstance(candidate, dict) and str(candidate.get("run_id") or "").strip()
+    ]
+    if not valid:
+        return None
+    valid.sort(key=_orchestrator_run_sort_key, reverse=True)
+    return valid[0]
 
 
 def _execute_supabase_with_retry(builder, label: str, attempts: int = 3, base_delay: float = 0.25):
@@ -64,6 +142,15 @@ class BaseRuntimeStateStore:
         raise NotImplementedError
 
     def touch_auth_session(self, token: str, seen_at: str | None = None) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def get_operator_session(self, phone: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def save_operator_session(self, phone: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def delete_operator_session(self, phone: str) -> bool:
         raise NotImplementedError
 
     def get_orchestrator_run(self, run_id: str) -> dict[str, Any] | None:
@@ -184,6 +271,40 @@ class JsonRuntimeStateStore(BaseRuntimeStateStore):
             self._save_json_unsafe(AUTH_SESSIONS_PATH, sessions)
             touched = dict(record)
         return touched
+
+    def get_operator_session(self, phone: str) -> dict[str, Any] | None:
+        key = str(phone or "").strip()
+        if not key:
+            return None
+        with file_lock(OPERATOR_SESSIONS_PATH, shared=True):
+            sessions = self._load_json_unsafe(OPERATOR_SESSIONS_PATH, {})
+            record = sessions.get(key)
+            return dict(record) if isinstance(record, dict) else None
+
+    def save_operator_session(self, phone: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        key = str(phone or "").strip()
+        record = {
+            "phone": key,
+            "payload_json": dict(payload or {}),
+            "updated_at": _utc_now_iso(),
+        }
+        with file_lock(OPERATOR_SESSIONS_PATH):
+            sessions = self._load_json_unsafe(OPERATOR_SESSIONS_PATH, {})
+            sessions[key] = record
+            self._save_json_unsafe(OPERATOR_SESSIONS_PATH, sessions)
+        return dict(record)
+
+    def delete_operator_session(self, phone: str) -> bool:
+        key = str(phone or "").strip()
+        if not key:
+            return False
+        with file_lock(OPERATOR_SESSIONS_PATH):
+            sessions = self._load_json_unsafe(OPERATOR_SESSIONS_PATH, {})
+            if key not in sessions:
+                return False
+            sessions.pop(key, None)
+            self._save_json_unsafe(OPERATOR_SESSIONS_PATH, sessions)
+        return True
 
     def get_orchestrator_run(self, run_id: str) -> dict[str, Any] | None:
         key = str(run_id or "").strip()
@@ -322,6 +443,44 @@ class SupabaseRuntimeStateStore(BaseRuntimeStateStore):
         )
         return self.get_auth_session(key)
 
+    def get_operator_session(self, phone: str) -> dict[str, Any] | None:
+        response = _execute_supabase_with_retry(
+            self.client.table("operator_sessions").select("*").eq("phone", str(phone or "").strip()).limit(1),
+            "get_operator_session",
+        )
+        rows = response.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "phone": row.get("phone"),
+            "payload_json": row.get("payload_json") or {},
+            "updated_at": row.get("updated_at"),
+        }
+
+    def save_operator_session(self, phone: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = {
+            "phone": str(phone or "").strip(),
+            "payload_json": dict(payload or {}),
+            "updated_at": _utc_now_iso(),
+        }
+        _execute_supabase_with_retry(
+            self.client.table("operator_sessions").upsert(normalized, on_conflict="phone"),
+            "save_operator_session",
+        )
+        return self.get_operator_session(normalized["phone"]) or normalized
+
+    def delete_operator_session(self, phone: str) -> bool:
+        key = str(phone or "").strip()
+        existing = self.get_operator_session(key)
+        if not existing:
+            return False
+        _execute_supabase_with_retry(
+            self.client.table("operator_sessions").delete().eq("phone", key),
+            "delete_operator_session",
+        )
+        return True
+
     def get_orchestrator_run(self, run_id: str) -> dict[str, Any] | None:
         response = _execute_supabase_with_retry(
             self.client.table("orchestrator_runs").select("*").eq("run_id", str(run_id or "").strip()).limit(1),
@@ -332,8 +491,9 @@ class SupabaseRuntimeStateStore(BaseRuntimeStateStore):
             return None
         row = rows[0]
         payload = dict(row.get("payload_json") or {})
-        payload.setdefault("run_id", row.get("run_id"))
-        payload.setdefault("status", row.get("status"))
+        payload["run_id"] = row.get("run_id") or payload.get("run_id")
+        if row.get("status"):
+            payload["status"] = row.get("status")
         payload.setdefault("created_at", row.get("created_at"))
         payload["updated_at"] = row.get("updated_at")
         if row.get("completed_at"):
@@ -346,6 +506,8 @@ class SupabaseRuntimeStateStore(BaseRuntimeStateStore):
         if not run_id:
             raise ValueError("run_id is required to save orchestrator run state.")
         normalized["run_id"] = run_id
+        normalized.setdefault("created_at", _utc_now_iso())
+        normalized["updated_at"] = _utc_now_iso()
         row = {
             "run_id": run_id,
             "status": str(normalized.get("status") or "queued").strip().lower(),
@@ -356,7 +518,7 @@ class SupabaseRuntimeStateStore(BaseRuntimeStateStore):
             self.client.table("orchestrator_runs").upsert(row, on_conflict="run_id"),
             "save_orchestrator_run",
         )
-        return self.get_orchestrator_run(run_id) or normalized
+        return _prefer_orchestrator_run(normalized, self.get_orchestrator_run(run_id)) or normalized
 
     def list_orchestrator_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         response = _execute_supabase_with_retry(
@@ -449,6 +611,19 @@ class FallbackRuntimeStateStore(BaseRuntimeStateStore):
             fallback_method = getattr(self.fallback, method_name)
             return fallback_method(*args, **kwargs)
 
+    def _call_or_none(self, backend: BaseRuntimeStateStore, method_name: str, *args, **kwargs):
+        method = getattr(backend, method_name)
+        try:
+            return method(*args, **kwargs)
+        except Exception as exc:
+            logger.warning(
+                "Runtime state backend %s failed for %s: %s",
+                getattr(backend, "backend_name", backend.__class__.__name__),
+                method_name,
+                exc,
+            )
+            return None
+
     def get_auth_session(self, token: str) -> dict[str, Any] | None:
         return self._call("get_auth_session", token)
 
@@ -464,14 +639,43 @@ class FallbackRuntimeStateStore(BaseRuntimeStateStore):
     def touch_auth_session(self, token: str, seen_at: str | None = None) -> dict[str, Any] | None:
         return self._call("touch_auth_session", token, seen_at)
 
+    def get_operator_session(self, phone: str) -> dict[str, Any] | None:
+        return self._call("get_operator_session", phone)
+
+    def save_operator_session(self, phone: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._call("save_operator_session", phone, payload)
+
+    def delete_operator_session(self, phone: str) -> bool:
+        return self._call("delete_operator_session", phone)
+
     def get_orchestrator_run(self, run_id: str) -> dict[str, Any] | None:
-        return self._call("get_orchestrator_run", run_id)
+        primary_payload = self._call_or_none(self.primary, "get_orchestrator_run", run_id)
+        fallback_payload = self._call_or_none(self.fallback, "get_orchestrator_run", run_id)
+        return _prefer_orchestrator_run(primary_payload, fallback_payload)
 
     def save_orchestrator_run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._call("save_orchestrator_run", payload)
+        normalized = dict(payload or {})
+        primary_payload = self._call_or_none(self.primary, "save_orchestrator_run", normalized)
+        fallback_payload = self._call_or_none(self.fallback, "save_orchestrator_run", normalized)
+        merged = _prefer_orchestrator_run(normalized, primary_payload, fallback_payload)
+        if merged is None:
+            raise RuntimeError("Unable to persist orchestrator run state.")
+        return merged
 
     def list_orchestrator_runs(self, limit: int = 100) -> list[dict[str, Any]]:
-        return self._call("list_orchestrator_runs", limit)
+        merged: dict[str, dict[str, Any]] = {}
+        for backend in (self.primary, self.fallback):
+            payloads = self._call_or_none(backend, "list_orchestrator_runs", limit) or []
+            for payload in payloads:
+                if not isinstance(payload, dict):
+                    continue
+                run_id = str(payload.get("run_id") or "").strip()
+                if not run_id:
+                    continue
+                merged[run_id] = _prefer_orchestrator_run(merged.get(run_id), payload) or dict(payload)
+        ordered = list(merged.values())
+        ordered.sort(key=_orchestrator_run_sort_key, reverse=True)
+        return ordered[: max(1, int(limit or 100))]
 
     def replace_reschedule_sessions(self, sessions: dict[str, Any]) -> dict[str, Any]:
         return self._call("replace_reschedule_sessions", sessions)
@@ -522,6 +726,18 @@ def delete_expired_auth_sessions(now_iso: str | None = None) -> int:
 
 def touch_auth_session(token: str, seen_at: str | None = None) -> dict[str, Any] | None:
     return get_runtime_state_store().touch_auth_session(token, seen_at=seen_at)
+
+
+def get_operator_session_state(phone: str) -> dict[str, Any] | None:
+    return get_runtime_state_store().get_operator_session(phone)
+
+
+def save_operator_session_state(phone: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return get_runtime_state_store().save_operator_session(phone, payload)
+
+
+def delete_operator_session_state(phone: str) -> bool:
+    return get_runtime_state_store().delete_operator_session(phone)
 
 
 def get_orchestrator_run_state(run_id: str) -> dict[str, Any] | None:
