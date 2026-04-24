@@ -21,7 +21,8 @@ except ImportError:
     msvcrt = None
 
 from client_store import get_data_backend_name
-from schedule_store import is_schedulable_job, load_schedule, mark_job_failed, schedule_signature
+from caption_technique_service import CAPTION_TECHNIQUE_REFRESH_TIME, get_caption_technique_snapshot_payload, refresh_caption_technique_snapshot
+from schedule_store import is_past_due_one_off_job, is_schedulable_job, load_schedule, mark_job_failed, schedule_signature
 from schedule_utils import parse_iso_date
 
 # Configure logging with rotation for the daemon layer
@@ -155,11 +156,23 @@ def run_date_bound_pipeline(client: str, topic: str, scheduled_date: str, images
     return schedule.CancelJob
 
 
-def load_schedule_config(filepath: str = "schedule.json") -> list:
+def load_schedule_config(filepath: str = "schedule.json") -> list | None:
     if not os.path.exists(filepath):
         logger.error(f"Config file '{filepath}' not found.")
         return []
-    return load_schedule(filepath)
+    try:
+        return load_schedule(filepath)
+    except Exception as exc:
+        logger.warning("Schedule store unavailable while loading %s: %s", filepath, exc)
+        return None
+
+
+def refresh_caption_techniques_job():
+    try:
+        snapshot = refresh_caption_technique_snapshot(force=True)
+        logger.info("Caption technique snapshot refreshed at %s.", snapshot.get("refreshed_at") or snapshot.get("last_good_refresh_at") or "unknown")
+    except Exception as exc:
+        logger.warning("Caption technique refresh failed: %s", exc)
 
 
 def convert_to_24hr(time_str: str) -> str:
@@ -209,6 +222,9 @@ def build_schedule(jobs: list):
 
         if scheduled_date:
             target_date = parse_iso_date(scheduled_date)
+            if is_past_due_one_off_job(job):
+                logger.warning(f"Skipping past-due one-off job {job_id} scheduled for {scheduled_date} at {raw_time}.")
+                continue
             if target_date and target_date < datetime.now().date():
                 logger.warning(f"Skipping past one-off job {job_id} scheduled for {scheduled_date} at {raw_time}.")
                 continue
@@ -246,6 +262,11 @@ def build_schedule(jobs: list):
             else:
                 logger.warning(f"Unrecognized day '{day}' for client '{client}'. Skipping this day rule.")
 
+    try:
+        schedule.every().day.at(CAPTION_TECHNIQUE_REFRESH_TIME).do(refresh_caption_techniques_job)
+    except Exception as exc:
+        logger.warning("Failed to schedule caption technique refresh at %s: %s", CAPTION_TECHNIQUE_REFRESH_TIME, exc)
+
 
 def schedule_state_signature(jobs: list[dict]) -> tuple:
     normalized = []
@@ -265,7 +286,11 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Load and print the schedule to verify, then exit immediately without starting the daemon.")
     args = parser.parse_args()
 
-    jobs = load_schedule_config()
+    jobs = load_schedule_config() or []
+    try:
+        get_caption_technique_snapshot_payload(force_refresh=False)
+    except Exception as exc:
+        logger.warning("Caption technique snapshot warmup failed: %s", exc)
     if not jobs:
         logger.info("No jobs found in schedule.json. Starting in idle mode ? waiting for hot-reload...")
     else:
@@ -313,12 +338,20 @@ def main():
                     logger.info("schedule.json modified on disk! Hot-reloading triggers...")
                     schedule.clear()
                     new_jobs = load_schedule_config(config_path)
+                    if new_jobs is None:
+                        logger.warning("Hot-reload skipped because the schedule store could not be reached.")
+                        time.sleep(10)
+                        continue
                     build_schedule(new_jobs)
                     last_mod_time = current_mod_time
                     last_schedule_signature = schedule_state_signature(new_jobs)
                     logger.info(f"Hot-reload complete. Now tracking {len(schedule.get_jobs())} triggers.")
             else:
                 fresh_jobs = load_schedule_config(config_path)
+                if fresh_jobs is None:
+                    logger.warning("Keeping the current schedule in memory because the store could not be reached.")
+                    time.sleep(10)
+                    continue
                 fresh_signature = schedule_state_signature(fresh_jobs)
                 if fresh_signature != last_schedule_signature:
                     logger.info("Schedule store changed in the database. Hot-reloading triggers...")

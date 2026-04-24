@@ -137,6 +137,7 @@ class TrendResearchServiceTests(unittest.TestCase):
                 }
                 self.client = {"profile_json": dict(self.brand)}
                 self.saved = None
+                self.trend_dossier = None
 
             def get_client(self, client_id):
                 return dict(self.client)
@@ -151,6 +152,13 @@ class TrendResearchServiceTests(unittest.TestCase):
             def save_brand_profile(self, client_id, payload):
                 self.saved = dict(payload)
                 self.brand = dict(payload)
+                return payload
+
+            def get_trend_dossier(self, client_id):
+                return dict(self.trend_dossier) if isinstance(self.trend_dossier, dict) else None
+
+            def save_trend_dossier(self, client_id, payload):
+                self.trend_dossier = dict(payload)
                 return payload
 
         fake_store = FakeStore()
@@ -187,7 +195,10 @@ class TrendResearchServiceTests(unittest.TestCase):
         self.assertEqual(len(snapshot_calls), first_call_count)
         self.assertEqual(first["client_id"], "Bakhourito")
         self.assertEqual(second["client_id"], "Bakhourito")
-        self.assertEqual(fake_store.saved["trend_dossier"]["source_links"], ["https://example.com/a"])
+        self.assertEqual(fake_store.trend_dossier["source_links"][0], "https://example.com/a")
+
+
+
 
     def test_caption_generation_uses_trend_dossier(self):
         fake_brand_data = {
@@ -205,56 +216,80 @@ class TrendResearchServiceTests(unittest.TestCase):
             "status": "ok",
             "provider": "tavily",
             "recency_days": 30,
-            "source_links": ["https://example.com/trend"],
+            "source_links": [{"title": "Trend", "url": "https://example.com/trend", "published_at": ""}],
             "recent_signals": ["burger", "combo"],
             "source_signals": ["burger", "combo"],
-            "trend_angles": [{"angle": "Late night cravings", "supporting_signals": 3}],
+            "trend_angles": ["Late night cravings"],
+            "hook_patterns": ["Lead with the late-night craving angle."],
+            "topical_language": ["burger", "combo"],
+            "anti_cliche_guidance": ["Avoid generic hype."],
             "source_coverage": "1 recent signal",
             "fetched_at": "2026-04-11T00:00:00+00:00",
             "expires_at": "2026-04-12T00:00:00+00:00",
         }
 
-        class FakeCompletions:
-            def __init__(self, outer):
-                self.outer = outer
+        captured = {}
 
-            def create(self, **kwargs):
-                self.outer.calls.append(kwargs)
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(
-                                content=json.dumps(
-                                    {
-                                        "caption": "Fresh burger caption",
-                                        "hashtags": ["#burger"],
-                                        "seo_keyword_used": "burger",
-                                        "status": "success",
-                                    }
-                                )
-                            )
-                        )
-                    ]
-                )
+        def fake_model_json_payload(system_prompt, user_prompt, *, max_tokens, response_schema=None):
+            captured["system_prompt"] = system_prompt
+            captured["user_prompt"] = user_prompt
+            return (
+                {
+                    "caption": "Fresh burger caption",
+                    "hashtags": ["#burger"],
+                    "seo_keyword_used": "burger",
+                    "direction_label": "Late night cravings",
+                    "hook_style": "relatable problem",
+                },
+                [{"provider": "test", "model": "test-model", "attempt": 1, "status": "success"}],
+                "",
+            )
 
-        class FakeClient:
-            def __init__(self):
-                self.calls = []
-                self.chat = SimpleNamespace(completions=FakeCompletions(self))
-
-        fake_client = FakeClient()
-
-        with mock.patch.object(self.caption_agent, "_load_brand_profile_payload", return_value={"status": "success", "brand_data": fake_brand_data}), \
-            mock.patch.object(self.caption_agent, "get_client_trend_dossier", return_value=fake_dossier), \
-            mock.patch.object(self.caption_agent, "_build_client", return_value=(fake_client, "openrouter")):
-            result = self.caption_agent.generate_caption_payload("Bakhourito", "Burger launch", "image_post")
+        with mock.patch.object(
+            self.caption_agent,
+            "_load_brand_profile_payload",
+            return_value={"status": "success", "brand_data": fake_brand_data},
+        ), mock.patch.object(
+            self.caption_agent,
+            "get_client_trend_dossier",
+            return_value=fake_dossier,
+        ), mock.patch.object(
+            self.caption_agent,
+            "analyze_media_bundle",
+            return_value={
+                "analysis_summary": "Single-frame product feature.",
+                "visual_narrative": "Burger hero shot.",
+                "emotional_tone": "craveable",
+                "product_signals": ["burger"],
+                "hook_opportunities": ["late night"],
+                "cta_opportunities": ["order now"],
+                "platform_fit_hints": ["strong first line"],
+                "story_arc": "single-frame product feature",
+            },
+        ), mock.patch.object(
+            self.caption_agent,
+            "_call_model_json_payload",
+            side_effect=fake_model_json_payload,
+        ), mock.patch.object(
+            self.caption_agent,
+            "get_caption_technique_snapshot_payload",
+            return_value={"headline_rules": ["Lead with a specific use case."]},
+        ), mock.patch.object(
+            self.caption_agent,
+            "list_client_drafts",
+            return_value={"bundles": {}},
+        ):
+            result = self.caption_agent.generate_caption_payload(
+                "Bakhourito",
+                "Burger launch",
+                "image_post",
+            )
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["caption"], "Fresh burger caption")
-        self.assertTrue(fake_client.calls)
-        message_block = fake_client.calls[0]["messages"][1]["content"]
-        self.assertIn("Trend dossier JSON:", message_block)
-        self.assertIn("Late night cravings", message_block)
+        self.assertIn("Write one UNIQUE caption for Bakhourito.", captured["user_prompt"])
+        self.assertIn("Brand: Bakhourito", captured["system_prompt"])
+        self.assertIn("burger", f"{captured['system_prompt']} {captured['user_prompt']}".lower())
 
 
 if __name__ == "__main__":

@@ -227,6 +227,7 @@ def normalize_inbound_message(message: dict[str, Any]) -> dict[str, Any]:
     interactive = payload.get("interactive") or {}
     button_reply = interactive.get("button_reply") or {}
     list_reply = interactive.get("list_reply") or {}
+    button = payload.get("button") or {}
     normalized = {
         "message_id": str(payload.get("id") or "").strip(),
         "from": normalize_phone(payload.get("from")),
@@ -245,8 +246,24 @@ def normalize_inbound_message(message: dict[str, Any]) -> dict[str, Any]:
     if msg_type == "text":
         normalized["text"] = str((payload.get("text") or {}).get("body") or "").strip()
     elif msg_type == "interactive":
-        normalized["interactive_reply_id"] = str(button_reply.get("id") or list_reply.get("id") or "").strip()
-        normalized["interactive_reply_title"] = str(button_reply.get("title") or list_reply.get("title") or "").strip()
+        normalized["interactive_reply_id"] = str(
+            button_reply.get("id")
+            or list_reply.get("id")
+            or interactive.get("id")
+            or interactive.get("payload")
+            or ""
+        ).strip()
+        normalized["interactive_reply_title"] = str(
+            button_reply.get("title")
+            or list_reply.get("title")
+            or interactive.get("title")
+            or interactive.get("text")
+            or ""
+        ).strip()
+        normalized["text"] = normalized["interactive_reply_title"]
+    elif msg_type == "button":
+        normalized["interactive_reply_id"] = str(button.get("payload") or button.get("id") or "").strip()
+        normalized["interactive_reply_title"] = str(button.get("text") or button.get("title") or "").strip()
         normalized["text"] = normalized["interactive_reply_title"]
     elif msg_type in {"document", "image", "video"}:
         media_block = payload.get(msg_type) or {}

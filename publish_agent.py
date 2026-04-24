@@ -282,7 +282,7 @@ class PublishAgent:
     def _mirror_instagram_video_to_catbox(self, media_path: str) -> str:
         return self._mirror_media_to_catbox(media_path, ".mp4")
 
-    def _prepare_instagram_image_urls(self, image_paths: list[str], image_urls: list[str], current_host: str) -> tuple[list[str], str]:
+    def _prepare_instagram_image_urls(self, image_paths: list[str], image_urls: list[str], current_host: str, *, force: bool = False) -> tuple[list[str], str]:
         if not image_paths or not image_urls:
             return image_urls, ""
 
@@ -297,7 +297,7 @@ class PublishAgent:
         normalized_host = str(current_host or "").strip().lower()
         mirror_mode = str(os.getenv("INSTAGRAM_IMAGE_MIRROR_MODE") or "auto").strip().lower()
         should_mirror = False
-        if mirror_mode == "catbox":
+        if force or mirror_mode == "catbox":
             should_mirror = True
         elif mirror_mode == "auto":
             should_mirror = "trycloudflare.com" in normalized_host
@@ -333,7 +333,7 @@ class PublishAgent:
             )
         return ""
 
-    def _prepare_instagram_video_urls(self, video_paths: list[str], video_urls: list[str], current_host: str) -> tuple[list[str], str]:
+    def _prepare_instagram_video_urls(self, video_paths: list[str], video_urls: list[str], current_host: str, *, force: bool = False) -> tuple[list[str], str]:
         if not video_paths or not video_urls:
             return video_urls, ""
 
@@ -348,10 +348,10 @@ class PublishAgent:
         normalized_host = str(current_host or "").strip().lower()
         mirror_mode = str(os.getenv("INSTAGRAM_VIDEO_MIRROR_MODE") or "auto").strip().lower()
         should_mirror = False
-        if mirror_mode == "catbox":
+        if force or mirror_mode == "catbox":
             should_mirror = True
         elif mirror_mode == "auto":
-            should_mirror = ("trycloudflare.com" in normalized_host) or normalized_host.endswith("supabase.co")
+            should_mirror = "trycloudflare.com" in normalized_host
 
         if not should_mirror:
             return video_urls, ""
@@ -365,6 +365,27 @@ class PublishAgent:
                 f"Instagram reel publishing failed on the current temporary media host ({current_host}), "
                 f"and Jarvis could not mirror the video to the demo fallback host: {exc}"
             )
+
+    def _should_retry_instagram_with_mirror(self, current_host: str, instagram_result: dict[str, Any] | None) -> bool:
+        normalized_host = str(current_host or "").strip().lower()
+        if not normalized_host.endswith("supabase.co"):
+            return False
+        if not isinstance(instagram_result, dict):
+            return False
+        if str(instagram_result.get("status") or "").strip().lower() != "error":
+            return False
+        step = str(instagram_result.get("step") or "").strip().lower()
+        if step not in {"create_video_container", "create_container", "create_child_container", "create_carousel_container"}:
+            return False
+        detail = " ".join(
+            str(instagram_result.get(key) or "").strip()
+            for key in ("error_message", "detail")
+        ).lower()
+        raw_error = instagram_result.get("raw_error")
+        if isinstance(raw_error, dict):
+            detail = f"{detail} {str(raw_error.get('message') or '').strip().lower()}"
+        fetch_markers = ("could not be fetched", "could not fetch", "fetch the media", "invalid url")
+        return any(marker in detail for marker in fetch_markers)
 
     def _format_instagram_fetch_error(self, raw_error: dict[str, Any] | None, media_urls: list[str]) -> str:
         raw_error = raw_error or {}
@@ -621,16 +642,16 @@ class PublishAgent:
 
         client_name = agent1_output.get("client_name", "unknown_client")
         
-        # 2. Extract configuration (Prefer vault isolation, fallback to .env for testing)
-        fb_page_id = os.getenv("META_PAGE_ID")
-        ig_user_id = os.getenv("META_IG_USER_ID")
-        access_token = os.getenv("META_ACCESS_TOKEN")
+        # 2. Extract configuration strictly from the client record.
+        fb_page_id = ""
+        ig_user_id = ""
+        access_token = ""
         
         try:
             cdata = get_client_store().get_client(client_name) or {}
-            access_token = cdata.get("meta_access_token", access_token)
-            fb_page_id = cdata.get("facebook_page_id", fb_page_id)
-            ig_user_id = cdata.get("instagram_account_id", ig_user_id)
+            access_token = str(cdata.get("meta_access_token") or "").strip()
+            fb_page_id = str(cdata.get("facebook_page_id") or "").strip()
+            ig_user_id = str(cdata.get("instagram_account_id") or "").strip()
         except Exception as e:
             logger.error(f"Client credential lookup failed for {client_name}: {e}")
 
@@ -657,8 +678,8 @@ class PublishAgent:
             return {"status": "error", "message": missing_media_error}
 
         if not access_token:
-            logger.error("Missing META_ACCESS_TOKEN.")
-            return {"status": "error", "message": "Missing META_ACCESS_TOKEN in environment."}
+            logger.error("Missing client Meta access token.")
+            return {"status": "error", "message": f"No Meta Access Token configured for client '{client_name}'."}
 
         # 4. Format Content
         caption = str(agent1_output.get("caption", "") or "").strip()
@@ -761,6 +782,40 @@ class PublishAgent:
                 elif ig_res is None:
                     logger.info(f"Publishing to Instagram Account: {ig_user_id} ({media_count} items)")
                     ig_res = self._publish_to_instagram(ig_user_id, access_token, ig_caption, ig_image_urls, ig_video_urls)
+                    if self._should_retry_instagram_with_mirror(current_host, ig_res):
+                        logger.warning(
+                            f"Instagram direct publish from host {current_host} failed with fetch-style error. Retrying once with mirrored media."
+                        )
+                        if image_urls and not video_urls:
+                            ig_image_urls, mirror_error = self._prepare_instagram_image_urls(
+                                images,
+                                image_urls,
+                                current_host or "unknown-host",
+                                force=True,
+                            )
+                            if mirror_error:
+                                ig_res = {
+                                    "status": "error",
+                                    "error_message": mirror_error,
+                                    "step": "image_mirror",
+                                }
+                            else:
+                                ig_res = self._publish_to_instagram(ig_user_id, access_token, ig_caption, ig_image_urls, [])
+                        elif video_urls:
+                            ig_video_urls, mirror_error = self._prepare_instagram_video_urls(
+                                videos,
+                                video_urls,
+                                current_host or "unknown-host",
+                                force=True,
+                            )
+                            if mirror_error:
+                                ig_res = {
+                                    "status": "error",
+                                    "error_message": mirror_error,
+                                    "step": "video_mirror",
+                                }
+                            else:
+                                ig_res = self._publish_to_instagram(ig_user_id, access_token, ig_caption, [], ig_video_urls)
             results["platform_results"]["instagram"] = ig_res
         else:
             logger.warning("No META_IG_USER_ID defined. Skipping Instagram.")

@@ -64,6 +64,26 @@ class StrategyRoutingTests(unittest.TestCase):
             with self.subTest(prompt=prompt):
                 self.assertEqual(self.strategy_agent.derive_strategy_window(prompt), expected)
 
+    def test_extract_strategy_client_id_supports_spaceful_mentions(self):
+        with unittest.mock.patch.object(
+            self.strategy_agent,
+            "get_client_store",
+            return_value=unittest.mock.Mock(list_client_ids=unittest.mock.Mock(return_value=["Cedar Roast", "Bakhourito"])),
+        ):
+            self.assertEqual(
+                self.strategy_agent.extract_strategy_client_id("/strategy @Cedar Roast next month plan"),
+                "Cedar Roast",
+            )
+
+    def test_build_strategy_request_uses_default_client_id_when_prompt_has_no_mention(self):
+        with unittest.mock.patch.object(self.strategy_agent, "resolve_client_id", side_effect=lambda raw: raw):
+            request = self.strategy_agent.build_strategy_request_from_prompt(
+                "next month content strategy focused on premium iced coffee",
+                default_client_id="Cedar Roast",
+            )
+
+        self.assertEqual(request["client_id"], "Cedar Roast")
+
 
 if __name__ == "__main__":
     unittest.main()

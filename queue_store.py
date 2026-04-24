@@ -107,6 +107,7 @@ def normalize_bundle_entry(bundle_name: str, payload: Any) -> dict[str, Any]:
         caption_status = str(payload.get("caption_status") or ("ready" if caption_text else "empty")).strip().lower()
         topic_hint = sanitize_topic_hint(bundle_name, payload.get("topic_hint"))
         hashtags = normalize_hashtag_list(payload.get("hashtags", []))
+        caption_metadata = payload.get("caption_metadata") if isinstance(payload.get("caption_metadata"), dict) else {}
 
         return {
             "bundle_name": bundle_name,
@@ -118,6 +119,7 @@ def normalize_bundle_entry(bundle_name: str, payload: Any) -> dict[str, Any]:
             "hashtags": hashtags,
             "seo_keyword_used": seo_keyword_used,
             "topic_hint": topic_hint,
+            "caption_metadata": caption_metadata,
         }
 
     legacy_files = [str(item).strip() for item in (payload or []) if str(item).strip()]
@@ -139,6 +141,7 @@ def normalize_bundle_entry(bundle_name: str, payload: Any) -> dict[str, Any]:
         "hashtags": [],
         "seo_keyword_used": "",
         "topic_hint": "",
+        "caption_metadata": {},
     }
 
 
@@ -159,6 +162,7 @@ def normalize_queue_data(data: Any) -> dict[str, Any]:
                 "hashtags": normalized["hashtags"],
                 "seo_keyword_used": normalized["seo_keyword_used"],
                 "topic_hint": normalized["topic_hint"],
+                "caption_metadata": normalized["caption_metadata"],
             }
     return {"bundles": normalized_bundles}
 
@@ -198,6 +202,7 @@ def get_bundle_payload(queue_path: str, bundle_name: str) -> dict[str, Any] | No
         "hashtags": normalized["hashtags"],
         "seo_keyword_used": normalized["seo_keyword_used"],
         "topic_hint": normalized["topic_hint"],
+        "caption_metadata": normalized["caption_metadata"],
     }
 
 

@@ -199,6 +199,12 @@ def resolve_date_phrase(text: str | None, base_date: date | None = None) -> date
     if relative:
         return _resolve_relative_weekday(base, relative.group(1), relative.group(2))
 
+    bare_weekday = re.match(r"^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$", cleaned)
+    if bare_weekday:
+        target = WEEKDAY_INDEX.get(bare_weekday.group(1))
+        if target is not None:
+            return _next_or_same_weekday(base, target)
+
     month_day = re.match(
         r"^(?:(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+)?"
         r"(january|february|march|april|may|june|july|august|september|october|november|december|"
@@ -207,6 +213,21 @@ def resolve_date_phrase(text: str | None, base_date: date | None = None) -> date
     )
     if month_day:
         weekday_name, month_name, day_num, year_num = month_day.groups()
+        month = MONTH_INDEX.get(month_name)
+        candidate = _candidate_from_month_day(base, month, int(day_num), int(year_num) if year_num else None)
+        if candidate and weekday_name and candidate.strftime("%A").lower() != weekday_name.lower():
+            return None
+        return candidate
+
+    day_month = re.match(
+        r"^(?:(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+)?"
+        r"(\d{1,2})\s+"
+        r"(january|february|march|april|may|june|july|august|september|october|november|december|"
+        r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)(?:\s+(\d{4}))?$",
+        cleaned,
+    )
+    if day_month:
+        weekday_name, day_num, month_name, year_num = day_month.groups()
         month = MONTH_INDEX.get(month_name)
         candidate = _candidate_from_month_day(base, month, int(day_num), int(year_num) if year_num else None)
         if candidate and weekday_name and candidate.strftime("%A").lower() != weekday_name.lower():
@@ -229,6 +250,14 @@ def resolve_date_phrase(text: str | None, base_date: date | None = None) -> date
         weekday_name, day_num, year_num = weekday_and_day.groups()
         return _candidate_from_day_of_month(base, int(day_num), weekday_name=weekday_name, year=int(year_num) if year_num else None)
 
+    day_and_weekday = re.match(
+        r"^(\d{1,2})\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:\s+(\d{4}))?$",
+        cleaned,
+    )
+    if day_and_weekday:
+        day_num, weekday_name, year_num = day_and_weekday.groups()
+        return _candidate_from_day_of_month(base, int(day_num), weekday_name=weekday_name, year=int(year_num) if year_num else None)
+
     return None
 
 
@@ -236,9 +265,9 @@ def normalize_schedule_request(days: list[str], scheduled_date: str | None = Non
     base = base_dt or datetime.now()
     raw_days = coerce_days(days)
 
-    resolved_from_days = resolve_date_phrase(raw_days[0], base.date()) if len(raw_days) == 1 else None
     resolved_from_scheduled = resolve_date_phrase(scheduled_date, base.date()) if scheduled_date else None
-    resolved_date = resolved_from_days or resolved_from_scheduled
+    resolved_from_days = resolve_date_phrase(raw_days[0], base.date()) if len(raw_days) == 1 else None
+    resolved_date = resolved_from_scheduled or resolved_from_days
 
     if resolved_date:
         return resolved_date.isoformat(), [resolved_date.strftime("%A")]
@@ -257,9 +286,9 @@ def schedule_request_is_in_past(
     base = base_dt or datetime.now()
     scheduled_time = parse_time_string(time_str)
     raw_day_values = coerce_days(raw_days)
-    resolved_from_days = resolve_date_phrase(raw_day_values[0], base.date()) if len(raw_day_values) == 1 else None
     resolved_from_scheduled = resolve_date_phrase(scheduled_date, base.date()) if scheduled_date else None
-    resolved_date = resolved_from_days or resolved_from_scheduled
+    resolved_from_days = resolve_date_phrase(raw_day_values[0], base.date()) if len(raw_day_values) == 1 else None
+    resolved_date = resolved_from_scheduled or resolved_from_days
 
     if resolved_date:
         scheduled_dt = datetime.combine(resolved_date, scheduled_time)

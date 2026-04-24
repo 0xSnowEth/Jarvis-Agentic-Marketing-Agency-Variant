@@ -18,6 +18,8 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import hmac
+import hashlib
 import asyncio
 import shutil
 import uuid
@@ -26,9 +28,12 @@ import subprocess
 import secrets
 from typing import Optional, List, Any
 from urllib.parse import quote, urlparse
+from contextlib import asynccontextmanager
 from pypdf import PdfReader
 from docx import Document
 from input_validation import validate_client_id, validate_filename, InputValidationError
+from external_context_safety import sanitize_external_text, sanitize_website_digest
+from agent import Agent
 
 MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
 
@@ -84,11 +89,13 @@ from queue_store import (
     sanitize_topic_hint,
 )
 from orchestrator_agent import resolve_client_id
+from public_base_url import get_meta_oauth_redirect_uri, remember_public_base_from_request
 from whatsapp_agent import run_whatsapp_agent, run_triage_agent
 from whatsapp_operator import build_meta_connect_link, handle_operator_message, is_operator_phone
 from whatsapp_transport import (
     normalize_inbound_message,
     send_button_message as transport_send_button_message,
+    send_list_message as transport_send_list_message,
     send_text_message as transport_send_text_message,
 )
 from publish_agent import publish_agent
@@ -108,6 +115,7 @@ from runtime_state_store import (
     delete_operator_session_state,
     delete_expired_auth_sessions,
     get_auth_session,
+    get_operator_session_state,
     get_orchestrator_run_state,
     get_runtime_state_store,
     list_orchestrator_run_states,
@@ -120,7 +128,7 @@ from runtime_state_store import (
     touch_auth_session,
 )
 
-load_dotenv()
+load_dotenv(override=True)
 # The synthesizer used to run on Mistral Nemo. With no paid OpenRouter credits available,
 # keep intake on the lighter Qwen free route instead of the heavier 80B fallback.
 SYNTHESIZER_MODEL = os.getenv("SYNTHESIZER_MODEL", "qwen/qwen3.6-plus-preview:free").strip() or "qwen/qwen3.6-plus-preview:free"
@@ -140,6 +148,54 @@ VISIBLE_SMART_DRAFT_RE = re.compile(
 HEADER_ACCENTS = ["🔵", "🟢", "🟠", "🟣"]
 
 
+def _synthesizer_candidate_models(quick_intake_only: bool) -> list[str]:
+    candidates: list[str] = []
+    if SYNTHESIZER_MODEL:
+        candidates.append(SYNTHESIZER_MODEL)
+    if os.getenv("GROQ_API_KEY"):
+        candidates.append("groq:llama-3.3-70b-versatile")
+    if os.getenv("OPENAI_API_KEY"):
+        candidates.append("openai:gpt-4.1-mini")
+    if not quick_intake_only:
+        candidates.extend(["qwen/qwen3.6-plus-preview:free", "qwen/qwen3-next-80b-a3b-instruct:free"])
+
+    prepared: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        model = str(candidate or "").strip()
+        if not model or model in seen:
+            continue
+        if model.startswith("groq:") and not os.getenv("GROQ_API_KEY"):
+            continue
+        if model.startswith("openai:") and not os.getenv("OPENAI_API_KEY"):
+            continue
+        if ":" not in model and not os.getenv("OPENROUTER_API_KEY"):
+            continue
+        seen.add(model)
+        prepared.append(model)
+    return prepared
+
+
+def _extract_llm_response_content(response: Any) -> str:
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return ""
+    message = getattr(choices[0], "message", None)
+    return str(getattr(message, "content", "") or "").strip()
+
+
+async def _request_synthesis_via_agent(candidate_model: str, prompt: str) -> str:
+    def _run() -> str:
+        helper = Agent([], model=candidate_model)
+        helper.system_message = (
+            "You are a precise brand profile extractor. Return only one valid JSON object matching the requested schema. "
+            "No markdown fences. No commentary outside JSON."
+        )
+        return _extract_llm_response_content(helper.chat(prompt))
+
+    return await asyncio.to_thread(_run)
+
+
 JARVIS_ADMIN_PASSWORD = os.getenv("JARVIS_ADMIN_PASSWORD", "").strip()
 JARVIS_AUTH_ENABLED = bool(JARVIS_ADMIN_PASSWORD)
 JARVIS_SESSION_TTL_HOURS = max(1, int(os.getenv("JARVIS_SESSION_TTL_HOURS", "12") or "12"))
@@ -147,6 +203,7 @@ _auth_sessions: dict[str, float] = {}
 JARVIS_STRICT_STARTUP = str(os.getenv("JARVIS_STRICT_STARTUP", "")).strip().lower() in {"1", "true", "yes", "on"}
 APPROVAL_ROUTING_MODES = {"desktop_first", "desktop_and_whatsapp", "whatsapp_only"}
 VAULT_DRAFT_CACHE_TTL_SECONDS = max(60, int(os.getenv("VAULT_DRAFT_CACHE_TTL_SECONDS", "1800") or "1800"))
+
 _vault_draft_cache: dict[str, tuple[float, dict]] = {}
 RATE_LIMIT_WINDOW_SECONDS = max(15, int(os.getenv("JARVIS_RATE_LIMIT_WINDOW_SECONDS", "60") or "60"))
 RATE_LIMIT_DEFAULTS = {
@@ -158,6 +215,8 @@ RATE_LIMIT_DEFAULTS = {
     "caption": max(2, int(os.getenv("JARVIS_RATE_LIMIT_CAPTION", "30") or "30")),
     "approval_action": max(3, int(os.getenv("JARVIS_RATE_LIMIT_APPROVAL_ACTION", "30") or "30")),
     "default": max(20, int(os.getenv("JARVIS_RATE_LIMIT_DEFAULT", "120") or "120")),
+    "whatsapp_webhook": max(20, int(os.getenv("JARVIS_RATE_LIMIT_WHATSAPP_WEBHOOK", "300") or "300")),
+    "vault_caption": max(2, int(os.getenv("JARVIS_RATE_LIMIT_VAULT_CAPTION", "30") or "30"))
 }
 _rate_limit_buckets: dict[str, collections.deque[float]] = {}
 _startup_validation_snapshot: dict[str, object] = {}
@@ -265,11 +324,32 @@ def _rate_limit_bucket_name(request: Request) -> str:
         return "caption"
     if path.startswith("/api/approvals/") and request.method.upper() == "POST":
         return "approval_action"
+    if path == "/webhook":
+        return "whatsapp_webhook"
+    if path.startswith("/api/vault/") and path.endswith("/generate-caption"):
+        return "vault_caption"
     return "default"
 
 
+def _verify_meta_webhook_signature(raw_body: bytes, signature_header: str | None) -> bool:
+    app_secret = str(os.getenv("META_APP_SECRET") or "").strip()
+    if not app_secret:
+        return True
+    raw_header = str(signature_header or "").strip()
+    if not raw_header.startswith("sha256="):
+        return False
+    expected = "sha256=" + hmac.new(
+        app_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, raw_header)
+
+
+
 def _check_rate_limit(request: Request) -> dict | None:
-    if not (request.url.path or "/").startswith("/api/"):
+    path = request.url.path or "/"
+    if not (path.startswith("/api/") or path == "/webhook"):
         return None
     bucket_name = _rate_limit_bucket_name(request)
     limit = RATE_LIMIT_DEFAULTS.get(bucket_name, RATE_LIMIT_DEFAULTS["default"])
@@ -291,6 +371,7 @@ def _check_rate_limit(request: Request) -> dict | None:
         }
     bucket.append(now)
     return None
+
 
 
 def _audit_event(
@@ -853,6 +934,10 @@ def _recompute_orchestrator_run_totals(run: dict) -> None:
     run["totals"] = totals
 
 
+def _is_successful_release_status(status: str) -> bool:
+    return str(status or "").strip().lower() in {"published", "scheduled", "completed", "partial_success"}
+
+
 async def _execute_orchestrator_batch_run(run_id: str) -> None:
     run = _load_orchestrator_run(run_id)
     if not run:
@@ -1024,8 +1109,7 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
                 )
 
         final_statuses = [str(item.get("status") or "").strip().lower() for item in run["items"]]
-        successful_statuses = {"published", "scheduled", "approval_ready", "approval_sent_whatsapp", "completed", "partial_success"}
-        if any(status == "failed" for status in final_statuses) and any(status in successful_statuses for status in final_statuses):
+        if any(status == "failed" for status in final_statuses) and any(_is_successful_release_status(status) for status in final_statuses):
             run["status"] = "partial_success"
         elif any(status == "failed" for status in final_statuses):
             run["status"] = "failed"
@@ -1046,8 +1130,13 @@ async def _execute_orchestrator_batch_run(run_id: str) -> None:
             },
             actor="jarvis-orchestrator",
         )
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await jarvis_startup_validation()
+    yield
 
-app = FastAPI(title="Jarvis WhatsApp Listener")
+app = FastAPI(title="Jarvis WhatsApp Listener", lifespan=lifespan)
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -1101,7 +1190,10 @@ async def serve_dashboard_file():
 @app.middleware("http")
 async def jarvis_request_middleware(request: Request, call_next):
     request_id = _ensure_request_id(request)
-    if (request.url.path or "/").startswith("/api/"):
+    path = request.url.path or "/"
+    if path == "/webhook" or path.startswith("/api/meta-oauth"):
+        remember_public_base_from_request(request)
+    if path.startswith("/api/") or path == "/webhook":
         limited = _check_rate_limit(request)
         if limited:
             _audit_event(
@@ -1129,6 +1221,7 @@ async def jarvis_request_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
     return response
+
 
 
 @app.middleware("http")
@@ -1163,6 +1256,7 @@ os.makedirs("assets", exist_ok=True)
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_TEST_PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN", "jarvis_webhook_secret_2026")
+DEFAULT_VERIFY_TOKEN = "jarvis_webhook_secret_2026"
 GRAPH_API_VERSION = os.getenv("META_GRAPH_VERSION", "v23.0")
 RUNTIME_PROBE_TTL_SECONDS = 90
 _runtime_probe_cache: dict[str, tuple[float, dict]] = {}
@@ -1215,6 +1309,8 @@ def _is_public_path(path: str) -> bool:
     if path.startswith("/webhook"):
         return True
     if path.startswith("/assets"):
+        return True
+    if path in {"/api/meta-oauth/start", "/api/meta-oauth-callback"}:
         return True
     if path.startswith("/api/auth/"):
         return True
@@ -1325,11 +1421,7 @@ def get_whatsapp_runtime_config() -> tuple[str, str]:
 
 
 def _meta_oauth_redirect_uri() -> str:
-    explicit = str(os.getenv("META_OAUTH_REDIRECT_URI") or "").strip()
-    if explicit:
-        return explicit
-    public_base = str(os.getenv("META_OAUTH_PUBLIC_BASE_URL") or os.getenv("WEBHOOK_PROXY_URL") or "").strip().rstrip("/")
-    return f"{public_base}/api/meta-oauth-callback" if public_base else ""
+    return get_meta_oauth_redirect_uri()
 
 
 def _decode_meta_oauth_state(raw_state: str) -> dict[str, Any]:
@@ -1357,6 +1449,76 @@ def _score_meta_page_match(client_id: str, page: dict[str, Any], profile: dict[s
     return overlap + (20 if ig_block.get("id") else 0)
 
 
+def _extract_connectable_meta_choices(pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        ig_block = page.get("instagram_business_account") or {}
+        page_id = str(page.get("id") or "").strip()
+        page_name = str(page.get("name") or "").strip()
+        page_token = str(page.get("access_token") or "").strip()
+        ig_id = str(ig_block.get("id") or "").strip()
+        ig_username = str(ig_block.get("username") or "").strip()
+        if not page_id or not page_name or not page_token or not ig_id:
+            continue
+        choices.append(
+            {
+                "page_id": page_id,
+                "page_name": page_name,
+                "page_access_token": page_token,
+                "instagram_account_id": ig_id,
+                "instagram_username": ig_username,
+            }
+        )
+    return choices
+
+
+def _save_client_meta_connection(client_id: str, client_payload: dict[str, Any], choice: dict[str, Any]) -> dict[str, Any]:
+    updated_client = dict(client_payload or {})
+    updated_client["client_id"] = client_id
+    updated_client["meta_access_token"] = str(choice.get("page_access_token") or "").strip()
+    updated_client["facebook_page_id"] = str(choice.get("page_id") or "").strip()
+    updated_client["instagram_account_id"] = str(choice.get("instagram_account_id") or "").strip()
+    profile = dict(updated_client.get("profile_json") or {})
+    profile["instagram_connected"] = True
+    profile["connected_facebook_page_name"] = str(choice.get("page_name") or "").strip()
+    profile["connected_instagram_username"] = str(choice.get("instagram_username") or "").strip()
+    updated_client["profile_json"] = profile
+    get_client_store().save_client(client_id, updated_client)
+    clear_meta_probe_cache(client_id, updated_client)
+    return updated_client
+
+
+def _send_meta_account_choice_prompt(phone: str, client_id: str, choices: list[dict[str, Any]]) -> dict[str, Any]:
+    sections = [
+        {
+            "title": "Meta Accounts",
+            "rows": [
+                {
+                    "id": f"OP_META_PICK:{choice['page_id']}",
+                    "title": str(choice.get("page_name") or "").strip()[:24] or "Facebook Page",
+                    "description": (
+                        f"IG: {str(choice.get('instagram_username') or choice.get('instagram_account_id') or '').strip()}"
+                    )[:72],
+                }
+                for choice in choices[:10]
+            ],
+        }
+    ]
+    return transport_send_list_message(
+        phone,
+        header_text=f"Connect Meta for {format_client_label(client_id)}",
+        body_text=(
+            "Meta login succeeded, but multiple Page/Instagram options were granted.\n"
+            "Choose the exact account pair Jarvis should bind to this client."
+        ),
+        button_text="Choose Account",
+        sections=sections,
+        footer_text="This selection applies only to this client",
+    )
+
+
 def normalize_approval_routing_mode(value: str | None) -> str:
     mode = str(value or "").strip().lower()
     if mode not in APPROVAL_ROUTING_MODES:
@@ -1376,6 +1538,58 @@ def _probe_cache(cache_key: str, builder):
     value = builder()
     _runtime_probe_cache[cache_key] = (now, value)
     return value
+
+
+def _meta_probe_cache_key(client_id: str, profile: dict) -> str:
+    token = str((profile or {}).get("meta_access_token") or "").strip()
+    page_id = str((profile or {}).get("facebook_page_id") or "").strip()
+    ig_id = str((profile or {}).get("instagram_account_id") or "").strip()
+    return f"meta:{client_id}:{hash((token, page_id, ig_id))}"
+
+
+def clear_meta_probe_cache(client_id: str = "", profile: dict | None = None) -> None:
+    if client_id and isinstance(profile, dict):
+        _runtime_probe_cache.pop(_meta_probe_cache_key(client_id, profile), None)
+        return
+    stale_keys = [key for key in _runtime_probe_cache.keys() if str(key).startswith("meta:")]
+    for key in stale_keys:
+        _runtime_probe_cache.pop(key, None)
+
+
+_INBOUND_MESSAGE_TTL_SECONDS = 300
+_recent_inbound_message_ids: dict[str, float] = {}
+
+
+def _should_skip_inbound_message(message_id: str) -> bool:
+    normalized = str(message_id or "").strip()
+    if not normalized:
+        return False
+    now = time.time()
+    stale = [key for key, seen_at in _recent_inbound_message_ids.items() if now - seen_at > _INBOUND_MESSAGE_TTL_SECONDS]
+    for key in stale:
+        _recent_inbound_message_ids.pop(key, None)
+    if normalized in _recent_inbound_message_ids:
+        return True
+    _recent_inbound_message_ids[normalized] = now
+    return False
+
+
+def _owner_text_should_use_reschedule_lane(phone: str, raw_text: str) -> bool:
+    normalized_phone = _normalize_whatsapp_phone(phone)
+    agency_phone = _normalize_whatsapp_phone(get_agency_config().get("owner_phone", ""))
+    if not agency_phone or normalized_phone != agency_phone:
+        return False
+    if re.match(r"^\s*(APPROVE|REJECT)[\s_-]+([A-Z0-9]+)\s*$", str(raw_text or "").strip(), re.IGNORECASE):
+        return True
+    operator_session_record = get_operator_session_state(normalized_phone) or {}
+    operator_session = dict(operator_session_record.get("payload_json") or {})
+    operator_mode = str(operator_session.get("mode") or "").strip().lower()
+    expected_reply = str(operator_session.get("expected_reply") or "").strip().lower()
+    if operator_mode == "preview" and expected_reply == "schedule":
+        return False
+    reschedule_session = load_reschedule_sessions().get(normalized_phone) or {}
+    _approval_id, new_time, _new_days, _new_scheduled_date = parse_owner_reschedule_command(raw_text)
+    return bool(new_time or reschedule_session)
 
 
 def _is_process_running(patterns: list[str]) -> tuple[bool, str]:
@@ -1413,49 +1627,89 @@ def _meta_graph_get(path: str, token: str, params: dict | None = None) -> tuple[
     return True, payload
 
 
-def _validate_demo_meta_client(client_id: str, profile: dict) -> dict:
+def get_client_meta_connection_health(client_id: str, profile: dict, force_refresh: bool = False) -> dict:
     token = str(profile.get("meta_access_token") or "").strip()
     page_id = str(profile.get("facebook_page_id") or "").strip()
     ig_id = str(profile.get("instagram_account_id") or "").strip()
     if not token or not page_id or not ig_id:
-        return {"ok": False, "detail": "Missing Meta token, Facebook Page ID, or Instagram Account ID."}
+        return {
+            "ok": False,
+            "status": "missing",
+            "detail": "Missing Meta token, Facebook Page ID, or Instagram Account ID.",
+            "probe_source": "direct",
+        }
 
-    cache_key = f"meta:{client_id}:{hash((token, page_id, ig_id))}"
+    cache_key = _meta_probe_cache_key(client_id, profile)
+    now = time.time()
+    cached = _runtime_probe_cache.get(cache_key)
+    if force_refresh:
+        _runtime_probe_cache.pop(cache_key, None)
+        cached = None
+    if cached and now - cached[0] <= RUNTIME_PROBE_TTL_SECONDS:
+        cached_value = dict(cached[1] or {})
+        cached_value["probe_source"] = "cache"
+        return cached_value
 
     def builder():
         page_ok, page_payload = _meta_graph_get(page_id, token, {"fields": "id,name,instagram_business_account{id,username}"})
         if not page_ok:
             message = page_payload.get("error", {}).get("message", "Facebook Page validation failed.")
-            return {"ok": False, "detail": message}
+            return {
+                "ok": False,
+                "status": "unknown" if str(message).startswith("Meta probe failed:") else "expired_or_invalid",
+                "detail": message,
+                "probe_source": "live",
+            }
 
         linked_ig = (page_payload.get("instagram_business_account") or {})
         linked_ig_id = str(linked_ig.get("id") or "").strip()
         linked_ig_username = str(linked_ig.get("username") or "").strip()
         if not linked_ig_id:
-            return {"ok": False, "detail": f"Facebook Page {page_payload.get('name', page_id)} is not linked to an Instagram professional account."}
+            return {
+                "ok": False,
+                "status": "expired_or_invalid",
+                "detail": f"Facebook Page {page_payload.get('name', page_id)} is not linked to an Instagram professional account.",
+                "probe_source": "live",
+            }
         if linked_ig_id != ig_id:
             return {
                 "ok": False,
+                "status": "expired_or_invalid",
                 "detail": (
                     f"Stored Instagram Account ID does not match the page-linked account. "
                     f"Page is linked to {linked_ig_username or linked_ig_id}, but Jarvis has {ig_id}."
                 ),
+                "probe_source": "live",
             }
 
         ig_ok, ig_payload = _meta_graph_get(ig_id, token, {"fields": "id,username"})
         if not ig_ok:
             message = ig_payload.get("error", {}).get("message", "Instagram Account validation failed.")
-            return {"ok": False, "detail": message}
+            return {
+                "ok": False,
+                "status": "unknown" if str(message).startswith("Meta probe failed:") else "expired_or_invalid",
+                "detail": message,
+                "probe_source": "live",
+            }
 
         return {
             "ok": True,
+            "status": "connected",
             "detail": (
                 f"Facebook Page {page_payload.get('name', page_id)} and Instagram account "
                 f"{ig_payload.get('username', ig_id)} are linked and publish-ready."
             ),
+            "probe_source": "live",
         }
 
-    return _probe_cache(cache_key, builder)
+    value = builder()
+    _runtime_probe_cache[cache_key] = (time.time(), value)
+    return value
+
+
+def _validate_demo_meta_client(client_id: str, profile: dict) -> dict:
+    health = get_client_meta_connection_health(client_id, profile)
+    return {"ok": bool(health.get("ok")), "detail": str(health.get("detail") or "").strip()}
 
 
 def _validate_demo_whatsapp_runtime() -> dict:
@@ -2029,8 +2283,15 @@ async def verify_webhook(request: Request):
 async def api_meta_oauth_start(client_id: str, phone: str = "", state: str = ""):
     app_id = str(os.getenv("META_APP_ID") or "").strip()
     redirect_uri = _meta_oauth_redirect_uri()
-    if not app_id or not redirect_uri:
-        raise HTTPException(status_code=500, detail="META_APP_ID or META_OAUTH_REDIRECT_URI is not configured.")
+    missing: list[str] = []
+    if not app_id:
+        missing.append("META_APP_ID")
+    if not redirect_uri:
+        missing.append("META_OAUTH_REDIRECT_URI or META_OAUTH_PUBLIC_BASE_URL or WEBHOOK_PROXY_URL")
+    if not str(os.getenv("META_APP_SECRET") or "").strip():
+        missing.append("META_APP_SECRET")
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Meta OAuth is not configured. Missing: {', '.join(missing)}")
     safe_client_id = resolve_client_id(client_id)
     safe_phone = _normalize_whatsapp_phone(phone)
     oauth_state = str(state or "").strip()
@@ -2075,8 +2336,15 @@ async def api_meta_oauth_callback(code: str | None = None, state: str = "", erro
     app_id = str(os.getenv("META_APP_ID") or "").strip()
     app_secret = str(os.getenv("META_APP_SECRET") or "").strip()
     redirect_uri = _meta_oauth_redirect_uri()
-    if not app_id or not app_secret or not redirect_uri:
-        raise HTTPException(status_code=500, detail="Meta OAuth environment is incomplete.")
+    missing: list[str] = []
+    if not app_id:
+        missing.append("META_APP_ID")
+    if not app_secret:
+        missing.append("META_APP_SECRET")
+    if not redirect_uri:
+        missing.append("META_OAUTH_REDIRECT_URI or META_OAUTH_PUBLIC_BASE_URL or WEBHOOK_PROXY_URL")
+    if missing:
+        raise HTTPException(status_code=500, detail=f"Meta OAuth environment is incomplete. Missing: {', '.join(missing)}")
 
     token_response = requests.get(
         f"https://graph.facebook.com/{GRAPH_API_VERSION}/oauth/access_token",
@@ -2111,31 +2379,78 @@ async def api_meta_oauth_callback(code: str | None = None, state: str = "", erro
             send_whatsapp_message(operator_phone, f"Meta connect failed for {client_id}: no manageable Facebook Pages were found on that login.")
         return PlainTextResponse("No manageable Meta Pages were found. You can return to WhatsApp.")
 
-    best_page = max(pages, key=lambda item: _score_meta_page_match(client_id, item, profile))
-    ig_block = best_page.get("instagram_business_account") or {}
-    if not ig_block.get("id"):
+    connectable_choices = _extract_connectable_meta_choices(pages)
+    if not connectable_choices:
         if operator_phone:
             send_whatsapp_message(operator_phone, f"Meta connect failed for {client_id}: the selected Facebook Page has no linked Instagram professional account.")
         return PlainTextResponse("Selected Meta Page has no linked Instagram professional account.")
 
-    updated_client = dict(client_payload)
-    updated_client["client_id"] = client_id
-    updated_client["meta_access_token"] = str(best_page.get("access_token") or user_token).strip()
-    updated_client["facebook_page_id"] = str(best_page.get("id") or "").strip()
-    updated_client["instagram_account_id"] = str(ig_block.get("id") or "").strip()
-    profile["instagram_connected"] = True
-    profile["connected_facebook_page_name"] = str(best_page.get("name") or "").strip()
-    profile["connected_instagram_username"] = str(ig_block.get("username") or "").strip()
-    updated_client["profile_json"] = profile
-    get_client_store().save_client(client_id, updated_client)
+    if operator_phone and len(connectable_choices) > 1:
+        ranked_choices = sorted(
+            connectable_choices,
+            key=lambda item: _score_meta_page_match(
+                client_id,
+                {
+                    "id": item.get("page_id"),
+                    "name": item.get("page_name"),
+                    "instagram_business_account": {
+                        "id": item.get("instagram_account_id"),
+                        "username": item.get("instagram_username"),
+                    },
+                },
+                profile,
+            ),
+            reverse=True,
+        )
+        save_operator_session_state(
+            operator_phone,
+            {
+                "mode": "meta_account_pick",
+                "client_id": client_id,
+                "pending_meta_choices": ranked_choices,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        send_result = _send_meta_account_choice_prompt(operator_phone, client_id, ranked_choices)
+        if not send_result.get("success"):
+            lines = [
+                f"*Choose the Meta account for {format_client_label(client_id)}*",
+                "Reply with the exact Facebook Page name below:",
+                "",
+            ]
+            for index, choice in enumerate(ranked_choices[:10], start=1):
+                lines.append(
+                    f"{index}. {choice['page_name']} -> {choice.get('instagram_username') or choice.get('instagram_account_id')}"
+                )
+            send_whatsapp_message(operator_phone, "\n".join(lines))
+        return PlainTextResponse(
+            "Meta login succeeded. Return to WhatsApp and choose the correct Page/Instagram account for this client."
+        )
+
+    best_choice = connectable_choices[0] if len(connectable_choices) == 1 else max(
+        connectable_choices,
+        key=lambda item: _score_meta_page_match(
+            client_id,
+            {
+                "id": item.get("page_id"),
+                "name": item.get("page_name"),
+                "instagram_business_account": {
+                    "id": item.get("instagram_account_id"),
+                    "username": item.get("instagram_username"),
+                },
+            },
+            profile,
+        ),
+    )
+    _save_client_meta_connection(client_id, client_payload, best_choice)
     if operator_phone:
         delete_operator_session_state(operator_phone)
         send_whatsapp_message(
             operator_phone,
             (
-                f"{format_client_label(client_id)} is now connected.\n"
-                f"Facebook Page: {best_page.get('name')}\n"
-                f"Instagram: {ig_block.get('username') or ig_block.get('id')}\n"
+                f"{format_client_label(client_id)} is now connected to this Meta account.\n"
+                f"Facebook Page: {best_choice.get('page_name')}\n"
+                f"Instagram: {best_choice.get('instagram_username') or best_choice.get('instagram_account_id')}\n"
                 "You can go back to WhatsApp and continue posting."
             ),
         )
@@ -2146,7 +2461,13 @@ async def receive_message(request: Request):
     """
     Meta Cloud API continuously posts incoming messages wrapped in deep JSON arrays here.
     """
-    body = await request.json()
+
+
+    raw_body = await request.body()
+    signature = request.headers.get("X-Hub-Signature-256")
+    if not _verify_meta_webhook_signature(raw_body, signature):
+        raise HTTPException(status_code=403, detail="Invalid webhook signature.")
+    body = json.loads(raw_body.decode("utf-8"))
     
     # Strictly isolate WhatsApp Business API events
     if body.get("object") == "whatsapp_business_account":
@@ -2172,6 +2493,13 @@ async def receive_message(request: Request):
                 if "messages" in value:
                     for message in value["messages"]:
                         normalized_message = normalize_inbound_message(message)
+                        if _should_skip_inbound_message(normalized_message.get("message_id")):
+                            logger.info(
+                                "SYSTEM | DUPLICATE_INBOUND_SKIPPED | FROM %s | MSG %s",
+                                normalized_message.get("from", "unknown"),
+                                normalized_message.get("message_id", "unknown"),
+                            )
+                            continue
                         sender_phone = normalized_message.get("from")
                         record_whatsapp_inbound(sender_phone, normalized_message.get("timestamp"))
                         msg_type = normalized_message.get("type")
@@ -2179,17 +2507,19 @@ async def receive_message(request: Request):
                         if is_operator_phone(sender_phone):
                             if msg_type == "interactive":
                                 reply_id = str(normalized_message.get("interactive_reply_id") or "").strip()
+                                reply_text = str(
+                                    normalized_message.get("interactive_reply_title")
+                                    or normalized_message.get("text")
+                                    or ""
+                                ).strip()
                                 if reply_id.startswith(("APPROVE_", "REJECT_", "MOVE_")):
                                     await handle_interactive_reply(sender_phone, reply_id)
-                                elif reply_id:
+                                elif reply_id or reply_text:
                                     await handle_operator_message(normalized_message)
                                 continue
                             if msg_type == "text":
                                 raw_text = str(normalized_message.get("text") or "").strip()
-                                command_match = re.match(r"^\s*(APPROVE|REJECT)[\s_-]+([A-Z0-9]+)\s*$", raw_text, re.IGNORECASE)
-                                reschedule_session = load_reschedule_sessions().get(sender_phone) or {}
-                                _, new_time, _new_days, _new_scheduled_date = parse_owner_reschedule_command(raw_text)
-                                if command_match or new_time or reschedule_session:
+                                if _owner_text_should_use_reschedule_lane(sender_phone, raw_text):
                                     await handle_inbound_text(sender_phone, raw_text)
                                 else:
                                     await handle_operator_message(normalized_message)
@@ -2202,8 +2532,15 @@ async def receive_message(request: Request):
                             await handle_inbound_text(sender_phone, str(normalized_message.get("text") or ""))
                         elif msg_type == "interactive":
                             reply_id = str(normalized_message.get("interactive_reply_id") or "").strip()
+                            reply_text = str(
+                                normalized_message.get("interactive_reply_title")
+                                or normalized_message.get("text")
+                                or ""
+                            ).strip()
                             if reply_id:
                                 await handle_interactive_reply(sender_phone, reply_id)
+                            elif reply_text:
+                                await handle_inbound_text(sender_phone, reply_text)
                             
     return {"status": "ok"}
 
@@ -2276,7 +2613,7 @@ async def handle_interactive_reply(phone: str, reply_id: str):
             save_reschedule_sessions(sessions)
         return
 
-    if action == "APPROVE":
+    if False and action == "APPROVE":
         new_job = {
             "job_id": job.get("job_id"),
             "client": job["client"],
@@ -2320,7 +2657,7 @@ async def handle_interactive_reply(phone: str, reply_id: str):
                 f"?? Duplicate prevented. A matching active job already exists for {job['client']} at {job['time']}. Existing Job ID: {existing_job_id}.",
             )
             logger.warning(f"SYSTEM | DUPLICATE_APPROVAL | {approval_id} matched existing job {existing_job_id}")
-    else:
+    elif False:
         send_whatsapp_message(
             phone,
             (
@@ -2333,11 +2670,12 @@ async def handle_interactive_reply(phone: str, reply_id: str):
         )
         logger.info(f"SYSTEM | REJECTED | {approval_id} discarded.")
 
-    delete_pending_approval(approval_id)
-    sessions = load_reschedule_sessions()
-    if phone in sessions and str(sessions[phone].get("approval_id", "")).upper() == approval_id:
-        del sessions[phone]
-        save_reschedule_sessions(sessions)
+    if False:
+        delete_pending_approval(approval_id)
+        sessions = load_reschedule_sessions()
+        if phone in sessions and str(sessions[phone].get("approval_id", "")).upper() == approval_id:
+            del sessions[phone]
+            save_reschedule_sessions(sessions)
 
 async def handle_inbound_text(phone: str, msg_body: str):
     """
@@ -2394,6 +2732,9 @@ async def handle_inbound_text(phone: str, msg_body: str):
                     "Multiple drafts are waiting for new times. Tap `Move Time` on the exact draft you want to adjust, then send the new release window. If needed, you can still use `TIME <approval_id> Friday April 3 11:10 PM` as a fallback.",
                 )
                 return
+
+            await handle_operator_message({"from": phone, "type": "text", "text": msg_body})
+            return
 
     phone_map = load_phone_map()
     client_name = phone_map.get(phone, "UNKNOWN")
@@ -2485,8 +2826,6 @@ def _detect_brief_language(text: str) -> str:
     raw = str(text or "")
     arabic_chars = len(re.findall(r"[\u0600-\u06FF]", raw))
     latin_chars = len(re.findall(r"[A-Za-z]", raw))
-    if arabic_chars and latin_chars:
-        return "bilingual"
     if arabic_chars:
         return "arabic"
     return "english"
@@ -2555,6 +2894,13 @@ def _prepare_brief_for_synthesis(raw: str) -> str:
     head = text[:9500].rstrip()
     tail = text[-1800:].lstrip()
     return f"{head}\n\n[... brief truncated for synthesis speed ...]\n\n{tail}"
+
+
+def _security_warning(label: str, report: dict[str, Any]) -> str:
+    removed = int((report or {}).get("removed_line_count") or 0)
+    if removed <= 0:
+        return ""
+    return f"Jarvis removed {removed} instruction-like line(s) from {label} before using it as brand context."
 
 
 def _normalize_public_source_url(value: str | None) -> str:
@@ -2679,12 +3025,21 @@ def _prepare_synthesis_context(
 
     notes = str(raw_context or "").strip()
     if notes:
-        sections.append(f"Additional operator notes / brief material\n{notes}")
+        cleaned_notes, notes_report = sanitize_external_text(notes)
+        warning = _security_warning("uploaded notes or brief material", notes_report)
+        if warning:
+            warnings.append(warning)
+        if cleaned_notes:
+            sections.append(f"Additional operator notes / brief material\n{cleaned_notes}")
 
     normalized_website = _normalize_public_source_url(website_url)
     if normalized_website:
         website_digest = extract_website_digest(normalized_website)
         if isinstance(website_digest, dict) and str(website_digest.get("status") or "").strip() == "success":
+            website_digest, digest_report = sanitize_website_digest(website_digest)
+            warning = _security_warning("website digest", digest_report)
+            if warning:
+                warnings.append(warning)
             enrichments["website_digest"] = website_digest
             enrichments["website_url"] = normalized_website
             sections.append(
@@ -2698,7 +3053,11 @@ def _prepare_synthesis_context(
                 warnings.append(website_reason)
         website_text, website_warning = _fetch_public_reference_text(normalized_website, "Website")
         if website_text:
-            sections.append(f"Website reference (secondary source)\nURL: {normalized_website}\n{website_text}")
+            cleaned_website_text, website_report = sanitize_external_text(website_text)
+            warning = _security_warning("website reference text", website_report)
+            if warning:
+                warnings.append(warning)
+            sections.append(f"Website reference (secondary source)\nURL: {normalized_website}\n{cleaned_website_text or website_text}")
         else:
             sections.append(f"Website reference (secondary source)\nURL: {normalized_website}")
             if website_warning:
@@ -2710,7 +3069,11 @@ def _prepare_synthesis_context(
     if normalized_social:
         social_text, social_warning = _fetch_public_reference_text(normalized_social, "Social page")
         if social_text:
-            sections.append(f"Social page reference (secondary source)\nURL: {normalized_social}\n{social_text}")
+            cleaned_social_text, social_report = sanitize_external_text(social_text)
+            warning = _security_warning("social page reference text", social_report)
+            if warning:
+                warnings.append(warning)
+            sections.append(f"Social page reference (secondary source)\nURL: {normalized_social}\n{cleaned_social_text or social_text}")
         else:
             sections.append(f"Social page reference (secondary source)\nURL: {normalized_social}")
             if social_warning:
@@ -2748,20 +3111,22 @@ def _normalize_language_profile(profile: dict, raw_context: str) -> dict:
         elif legacy_target == "english":
             primary_language = primary_language or "english"
             caption_output_language = caption_output_language or "english"
-        elif legacy_target == "bilingual":
-            primary_language = primary_language or "bilingual"
-            caption_output_language = caption_output_language or "bilingual"
+        elif legacy_target:
+            primary_language = primary_language or ("arabic" if brief_language == "arabic" else "english")
+            caption_output_language = caption_output_language or primary_language
 
     if not primary_language:
-        if brief_language == "bilingual":
-            primary_language = "bilingual"
-        elif brief_language == "arabic":
+        if brief_language == "arabic":
             primary_language = "arabic"
         else:
             primary_language = "english"
 
     if not caption_output_language:
         caption_output_language = "arabic" if primary_language == "arabic" else primary_language
+    if caption_output_language not in {"arabic", "english"}:
+        caption_output_language = "arabic" if primary_language == "arabic" else "english"
+    if primary_language not in {"arabic", "english"}:
+        primary_language = "arabic" if caption_output_language == "arabic" else "english"
 
     if caption_output_language == "arabic" and not arabic_mode:
         arabic_mode = "gulf"
@@ -2785,12 +3150,99 @@ def _normalize_synthesized_profile_result(result: dict, raw_context: str) -> dic
         status = "success"
         missing_fields = _as_clean_list(parsed.get("missing_fields"))
 
-    data["language_profile"] = _normalize_language_profile(data, raw_context)
+    data = _normalize_profile_for_persistence(data, raw_context)
     return {
         "status": status,
         "missing_fields": missing_fields,
         "data": data,
     }
+
+
+def _normalize_profile_for_persistence(profile: dict, raw_context: str = "") -> dict:
+    profile = dict(profile or {})
+    if isinstance(profile.get("website_digest"), dict):
+        profile["website_digest"], _report = sanitize_website_digest(profile.get("website_digest"))
+    profile["language_profile"] = _normalize_language_profile(profile, raw_context)
+    explicit_main_language = str(profile.get("main_language") or "").strip().lower()
+    if explicit_main_language in {"arabic", "english"}:
+        language_profile = dict(profile.get("language_profile") or {})
+        if explicit_main_language == "arabic":
+            language_profile["primary_language"] = "arabic"
+            language_profile["caption_output_language"] = "arabic"
+            if not str(language_profile.get("arabic_mode") or "").strip():
+                language_profile["arabic_mode"] = "gulf"
+        else:
+            language_profile["primary_language"] = "english"
+            language_profile["caption_output_language"] = "english"
+            language_profile["arabic_mode"] = ""
+        profile["main_language"] = explicit_main_language
+        profile["language_profile"] = language_profile
+
+    business_name = str(profile.get("business_name") or "").strip()
+    business_type = str(profile.get("business_type") or profile.get("industry") or "").strip()
+    what_they_sell = str(profile.get("what_they_sell") or profile.get("offer_focus") or "").strip()
+    target_audience = str(profile.get("target_audience") or profile.get("audience_summary") or "").strip()
+    city_market = str(
+        profile.get("city_market")
+        or profile.get("market")
+        or profile.get("city")
+        or profile.get("location")
+        or ""
+    ).strip()
+    brand_tone = str(profile.get("brand_tone") or profile.get("tone") or "").strip()
+    products_examples = _as_clean_list(profile.get("products_examples"))
+    services = _as_clean_list(profile.get("services"))
+    if not services:
+        services = products_examples or _as_clean_list(what_they_sell)
+    if services:
+        profile["services"] = services
+
+    if business_type and not str(profile.get("industry") or "").strip():
+        profile["industry"] = business_type
+    if target_audience and not str(profile.get("target_audience") or "").strip():
+        profile["target_audience"] = target_audience
+    if city_market and not str(profile.get("city_market") or "").strip():
+        profile["city_market"] = city_market
+
+    voice = profile.get("brand_voice") or {}
+    if not isinstance(voice, dict):
+        voice = {}
+    if brand_tone and not str(voice.get("tone") or "").strip():
+        voice["tone"] = brand_tone
+    if not str(voice.get("style") or "").strip() and (brand_tone or business_type or what_they_sell):
+        voice["style"] = "Clear, social-first, premium brand communication."
+    caption_language = str((profile.get("language_profile") or {}).get("caption_output_language") or "").strip().lower()
+    if caption_language == "arabic" and not str(voice.get("dialect") or "").strip():
+        voice["dialect"] = "gulf_arabic_khaleeji"
+    if voice:
+        profile["brand_voice"] = voice
+
+    words_to_avoid = _as_clean_list(profile.get("words_to_avoid"))
+    if words_to_avoid and not _as_clean_list(profile.get("banned_words")):
+        profile["banned_words"] = words_to_avoid
+
+    if not str(profile.get("identity") or "").strip():
+        identity_parts = []
+        if business_type:
+            identity_parts.append(f"a {business_type}")
+        else:
+            identity_parts.append("a brand")
+        if what_they_sell:
+            identity_parts.append(f"focused on {what_they_sell}")
+        elif services:
+            identity_parts.append(f"focused on {', '.join(services[:4])}")
+        if target_audience:
+            identity_parts.append(f"for {target_audience}")
+        if city_market and city_market.lower() not in target_audience.lower():
+            identity_parts.append(f"in {city_market}")
+        if brand_tone:
+            identity_parts.append(f"with a {brand_tone} voice")
+        if business_name:
+            profile["identity"] = f"{business_name} is {' '.join(identity_parts)}.".strip()
+        elif identity_parts:
+            profile["identity"] = " ".join(identity_parts).strip().capitalize() + "."
+
+    return profile
 
 
 def build_brand_profile(client_id: str, profile: dict) -> dict:
@@ -2806,9 +3258,9 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
         "arabic_mode": "gulf"
     })
     main_language = str(profile.get("main_language") or "").strip().lower()
-    if main_language not in {"arabic", "english", "both"}:
+    if main_language not in {"arabic", "english"}:
         caption_language = str(language_profile.get("caption_output_language") or "").strip().lower()
-        main_language = "both" if caption_language == "bilingual" else (caption_language or "english")
+        main_language = "arabic" if caption_language == "arabic" else "english"
     city_market = str(
         profile.get("city_market")
         or profile.get("market")
@@ -2923,7 +3375,7 @@ def build_brand_profile(client_id: str, profile: dict) -> dict:
 
 
 def validate_synthesized_profile(profile: dict) -> list[str]:
-    profile = profile or {}
+    profile = _normalize_profile_for_persistence(profile or {})
     voice = profile.get("brand_voice") or {}
     missing = []
 
@@ -2937,10 +3389,8 @@ def validate_synthesized_profile(profile: dict) -> list[str]:
         missing.append("Target audience")
     if not str(profile.get("identity", "")).strip():
         missing.append("Brand identity summary")
-    if not str(voice.get("tone", "")).strip():
+    if not str(voice.get("tone", "") or profile.get("tone", "")).strip():
         missing.append("Brand voice tone")
-    if not str(voice.get("style", "")).strip():
-        missing.append("Brand voice style")
     return missing
 
 
@@ -2963,30 +3413,44 @@ def extract_brief_text(file_name: str, file_bytes: bytes) -> tuple[str, str]:
     raise ValueError(f"Unsupported brief file type: {ext}")
 
 
-@app.post("/api/parse-client-brief")
-async def api_parse_client_brief(file: UploadFile = File(...)):
-    file_bytes = await file.read()
-    if not file.filename:
-        return JSONResponse(status_code=400, content={"status": "error", "reason": "Missing filename."})
+def parse_client_brief_bytes(file_name: str, file_bytes: bytes) -> dict[str, Any]:
+    safe_name = str(file_name or "").strip()
+    if not safe_name:
+        return {"status": "error", "reason": "Missing filename."}
 
     try:
-        extracted_text, source_type = extract_brief_text(file.filename, file_bytes)
+        extracted_text, source_type = extract_brief_text(safe_name, file_bytes)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"status": "error", "reason": str(exc)})
+        return {"status": "error", "reason": str(exc)}
     except Exception as exc:
-        logger.error(f"API | PARSE BRIEF | Failed to parse {file.filename}: {exc}")
-        return JSONResponse(status_code=400, content={"status": "error", "reason": f"Could not parse {file.filename}. If it is scanned or image-only, paste extracted text manually."})
+        logger.error(f"API | PARSE BRIEF | Failed to parse {safe_name}: {exc}")
+        return {
+            "status": "error",
+            "reason": f"Could not parse {safe_name}. If it is scanned or image-only, paste extracted text manually.",
+        }
 
     if not extracted_text.strip():
-        return JSONResponse(status_code=400, content={"status": "error", "reason": f"No readable text was extracted from {file.filename}. If it is scanned or image-only, paste extracted text manually."})
+        return {
+            "status": "error",
+            "reason": f"No readable text was extracted from {safe_name}. If it is scanned or image-only, paste extracted text manually.",
+        }
 
     return {
         "status": "success",
-        "file_name": file.filename,
+        "file_name": safe_name,
         "source_type": source_type,
         "char_count": len(extracted_text),
         "text": extracted_text,
     }
+
+
+@app.post("/api/parse-client-brief")
+async def api_parse_client_brief(file: UploadFile = File(...)):
+    file_bytes = await file.read()
+    result = parse_client_brief_bytes(file.filename or "", file_bytes)
+    if str(result.get("status") or "").strip().lower() != "success":
+        return JSONResponse(status_code=400, content=result)
+    return result
 
 
 def _read_json_file(path: str, default):
@@ -3609,6 +4073,20 @@ def _collect_runtime_readiness(force: bool = False) -> dict:
                 else "No public tunnel process detected."
             ),
         },
+        "security_defaults": {
+            "ok": not (
+                str(os.getenv("JARVIS_ENV") or "").strip().lower() in {"prod", "production"}
+                and (VERIFY_TOKEN == DEFAULT_VERIFY_TOKEN or not str(JARVIS_ADMIN_PASSWORD or "").strip())
+            ),
+            "detail": (
+                "Security-sensitive env defaults look production-safe."
+                if not (
+                    str(os.getenv("JARVIS_ENV") or "").strip().lower() in {"prod", "production"}
+                    and (VERIFY_TOKEN == DEFAULT_VERIFY_TOKEN or not str(JARVIS_ADMIN_PASSWORD or "").strip())
+                )
+                else "Production mode is using the default webhook verify token or missing JARVIS_ADMIN_PASSWORD."
+            ),
+        },
     }
     required_keys = ("api", "runtime_state", "scheduler", "public_media_host")
     overall_ok = all(bool(checks[key]["ok"]) for key in required_keys)
@@ -3627,7 +4105,7 @@ def _collect_runtime_readiness(force: bool = False) -> dict:
     }
 
 
-@app.on_event("startup")
+
 async def jarvis_startup_validation() -> None:
     global _startup_validation_snapshot
     delete_expired_auth_sessions(now_iso=_utc_now_iso())
@@ -3871,23 +4349,27 @@ async def api_demo_readiness(force: int = 0):
         },
     }
 
-@app.post("/api/synthesize-client")
-async def api_synthesize_client(req: SynthesizeRequest):
-    logger.info(f"API | SYNTHESIZE | Extracting profile for {req.client_name} using {SYNTHESIZER_MODEL}")
-    
-    # Use OpenRouter for synthesis because the direct OpenAI key currently has no paid quota.
+async def synthesize_client_profile(
+    client_name: str,
+    *,
+    raw_context: str = "",
+    quick_intake: QuickIntakeRequest | dict | None = None,
+    website_url: str | None = None,
+    social_url: str | None = None,
+) -> dict[str, Any]:
+    logger.info(f"API | SYNTHESIZE | Extracting profile for {client_name} using {SYNTHESIZER_MODEL}")
+
     api_key = os.getenv("OPENROUTER_API_KEY")
     base_url = "https://openrouter.ai/api/v1"
-
-    if not api_key:
-        raise HTTPException(status_code=500, detail="Missing OPENROUTER_API_KEY in .env")
+    if not api_key and not os.getenv("GROQ_API_KEY") and not os.getenv("OPENAI_API_KEY"):
+        raise HTTPException(status_code=500, detail="Missing OpenRouter/Groq/OpenAI API key in .env")
 
     synthesis_context, source_warnings, enrichments = await asyncio.to_thread(
         _prepare_synthesis_context,
-        req.raw_context,
-        req.quick_intake,
-        req.website_url,
-        req.social_url,
+        raw_context,
+        quick_intake,
+        website_url,
+        social_url,
     )
     if not synthesis_context.strip():
         return {
@@ -3896,17 +4378,17 @@ async def api_synthesize_client(req: SynthesizeRequest):
         }
 
     quick_intake_only = bool(
-        req.quick_intake
-        and not str(req.raw_context or "").strip()
-        and not str(req.website_url or "").strip()
-        and not str(req.social_url or "").strip()
+        quick_intake
+        and not str(raw_context or "").strip()
+        and not str(website_url or "").strip()
+        and not str(social_url or "").strip()
     )
 
     if quick_intake_only:
         prompt = f"""You are a brand profile extractor.
 Read the client intake and return one JSON object only.
 
-Client Name: {req.client_name}
+Client Name: {client_name}
 Client Intake:
 {synthesis_context}
 
@@ -3916,9 +4398,9 @@ Rules:
 - If a field is unknown, leave it empty or [] and include it in missing_fields.
 - Keep the response compact and usable.
 - For language_profile:
-  - brief_language: english, arabic, or bilingual
-  - primary_language: english, arabic, or bilingual
-  - caption_output_language: english, arabic, or bilingual
+  - brief_language: english or arabic
+  - primary_language: english or arabic
+  - caption_output_language: english or arabic
   - arabic_mode: gulf or msa when Arabic output is chosen, else ""
 
 Return valid JSON only in this exact shape:
@@ -3961,16 +4443,16 @@ Return valid JSON only in this exact shape:
         prompt = f"""You are an expert Brand Strategist AND Data Extraction Specialist.
 Your job is to read raw notes/documents from a business owner and extract a complete brand profile.
 
-Client Name: {req.client_name}
+Client Name: {client_name}
 Raw Information:
 {synthesis_context}
 
 CRITICAL: Direct operator answers are the primary source of truth. Website/social content and uploaded notes are secondary enrichment only. You may infer minor supporting details, but you must NOT invent critical brand intelligence. If services, target audience, identity, or brand voice examples are missing, mark them in missing_fields instead of hallucinating them.
 
 For the `language_profile` block:
-- "brief_language": choose "english", "arabic", or "bilingual" based on the input brief.
-- "primary_language": choose "english", "arabic", or "bilingual" based on the brand's real communication lane.
-- "caption_output_language": choose the language Jarvis should generate captions in: "english", "arabic", or "bilingual".
+- "brief_language": choose "english" or "arabic" based on the input brief.
+- "primary_language": choose "english" or "arabic" based on the brand's real communication lane.
+- "caption_output_language": choose the language Jarvis should generate captions in: "english" or "arabic".
 - "arabic_mode": if caption_output_language is arabic, choose "gulf" or "msa". Default to "gulf" for gulf market brands.
 
 If generating an Arabic profile, generate seo_keywords and hashtag_bank in Arabic. For Gulf markets, use Khaleeji vocabulary for dialect_notes.
@@ -4011,9 +4493,7 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
   }}
 }}
 """
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers = {"Authorization": f"Bearer {api_key}"}
     if "openrouter" in base_url:
         headers["HTTP-Referer"] = "https://localhost"
         headers["X-Title"] = "Agency OS"
@@ -4025,17 +4505,11 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
         "response_format": {"type": "json_object"},
         "max_tokens": 1000 if quick_intake_only else 1600,
     }
-    
+
     try:
         total_timeout_seconds = SYNTHESIS_FAST_TIMEOUT_SECONDS if quick_intake_only else SYNTHESIS_TOTAL_TIMEOUT_SECONDS
         started_at = time.monotonic()
-        fallback_models = []
-        if SYNTHESIZER_MODEL:
-            fallback_models.append(SYNTHESIZER_MODEL)
-        if not quick_intake_only and "qwen/qwen3.6-plus-preview:free" not in fallback_models:
-            fallback_models.append("qwen/qwen3.6-plus-preview:free")
-        if not quick_intake_only and "qwen/qwen3-next-80b-a3b-instruct:free" not in fallback_models:
-            fallback_models.append("qwen/qwen3-next-80b-a3b-instruct:free")
+        fallback_models = _synthesizer_candidate_models(quick_intake_only)
 
         provider_error = None
         token_budgets = (1000,) if quick_intake_only else (1600, 2200)
@@ -4045,11 +4519,7 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
                 remaining = total_timeout_seconds - elapsed
                 if remaining <= 0:
                     provider_error = "Jarvis stopped the profile build because the provider took too long on the current model path."
-                    logger.warning(
-                        "Synthesis budget exhausted for %s after %.2fs.",
-                        req.client_name,
-                        elapsed,
-                    )
+                    logger.warning("Synthesis budget exhausted for %s after %.2fs.", client_name, elapsed)
                     return {"status": "error", "reason": provider_error}
 
                 request_payload = dict(data)
@@ -4060,18 +4530,33 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
                     max(8.0, min(45.0 if quick_intake_only else SYNTHESIS_READ_TIMEOUT_SECONDS, remaining)),
                 )
                 try:
-                    response = await asyncio.to_thread(
-                        requests.post,
-                        f"{base_url}/chat/completions",
-                        headers=headers,
-                        json=request_payload,
-                        timeout=request_timeout,
-                    )
+                    if ":" in candidate_model:
+                        content = await _request_synthesis_via_agent(candidate_model, prompt)
+                        finish_reason = ""
+                    else:
+                        response = await asyncio.to_thread(
+                            requests.post,
+                            f"{base_url}/chat/completions",
+                            headers=headers,
+                            json=request_payload,
+                            timeout=request_timeout,
+                        )
+                        if response.status_code != 200:
+                            provider_error = f"Provider rejected the request: {response.status_code}"
+                            logger.error(f"LLM API Error ({candidate_model}): {response.text}")
+                            if response.status_code in {402, 408, 429, 500, 502, 503, 504}:
+                                break
+                            break
+
+                        payload = response.json()
+                        choice = payload.get("choices", [{}])[0] or {}
+                        finish_reason = str(choice.get("finish_reason") or choice.get("native_finish_reason") or "").strip().lower()
+                        content = str(choice.get("message", {}).get("content", "") or "").strip()
                 except requests.Timeout:
                     provider_error = "Jarvis stopped the profile build because the provider took too long on the current model path."
                     logger.warning(
                         "Synthesis provider timeout for %s on %s at max_tokens=%s after %.2fs total elapsed.",
-                        req.client_name,
+                        client_name,
                         candidate_model,
                         token_budget,
                         time.monotonic() - started_at,
@@ -4081,36 +4566,36 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
                     provider_error = f"Provider connection failed: {type(request_exc).__name__}"
                     logger.warning(
                         "Synthesis provider request failed for %s on %s at max_tokens=%s: %s",
-                        req.client_name,
+                        client_name,
                         candidate_model,
                         token_budget,
                         request_exc,
                     )
                     continue
-
-                if response.status_code != 200:
-                    provider_error = f"Provider rejected the request: {response.status_code}"
-                    logger.error(f"LLM API Error ({candidate_model}): {response.text}")
+                except Exception as request_exc:
+                    provider_error = str(request_exc).strip() or f"Synthesis failed on {candidate_model}."
+                    logger.warning(
+                        "Synthesis provider failure for %s on %s at max_tokens=%s: %s",
+                        client_name,
+                        candidate_model,
+                        token_budget,
+                        request_exc,
+                    )
                     break
-
-                payload = response.json()
-                choice = payload.get("choices", [{}])[0] or {}
-                finish_reason = str(choice.get("finish_reason") or choice.get("native_finish_reason") or "").strip().lower()
-                content = str(choice.get("message", {}).get("content", "") or "").strip()
                 try:
                     parsed = _extract_first_json_object(content)
                 except Exception as parse_exc:
                     if finish_reason == "length" and token_budget < 2200:
                         logger.warning(
                             "Synthesis response truncated for %s on %s at max_tokens=%s; retrying with a larger budget.",
-                            req.client_name,
+                            client_name,
                             candidate_model,
                             token_budget,
                         )
                         continue
                     logger.error(
                         "Synthesis parse failed for %s on %s at max_tokens=%s (finish_reason=%s): %s",
-                        req.client_name,
+                        client_name,
                         candidate_model,
                         token_budget,
                         finish_reason or "unknown",
@@ -4121,8 +4606,8 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
 
                 result = _normalize_synthesized_profile_result(parsed, synthesis_context)
                 profile_data = result.get("data") or {}
-                normalized_website = _normalize_public_source_url(req.website_url)
-                normalized_social = _normalize_public_source_url(req.social_url)
+                normalized_website = _normalize_public_source_url(website_url)
+                normalized_social = _normalize_public_source_url(social_url)
                 if normalized_website:
                     profile_data["website_url"] = normalized_website
                 if normalized_social:
@@ -4148,6 +4633,17 @@ Return ONLY valid JSON matching this exact schema. Do not wrap in markdown tags:
     except Exception as e:
         logger.error(f"Failed to parse LLM JSON: {e}")
         return {"status": "error", "reason": "Failed to synthesize profile via AI. Check backend logs."}
+
+
+@app.post("/api/synthesize-client")
+async def api_synthesize_client(req: SynthesizeRequest):
+    return await synthesize_client_profile(
+        req.client_name,
+        raw_context=req.raw_context,
+        quick_intake=req.quick_intake,
+        website_url=req.website_url,
+        social_url=req.social_url,
+    )
 
 
 async def _background_build_client_trend_dossier(client_id: str) -> None:
@@ -4191,11 +4687,19 @@ class ProfileSaveRequest(BaseModel):
     instagram_account_id: str
     profile_json: dict
 
-@app.post("/api/save-client-profile")
-async def api_save_client_profile(req: ProfileSaveRequest):
-    logger.info(f"API | SAVE | Writing profile for {req.client_id} to disk")
+async def persist_client_profile(
+    client_id: str,
+    profile_json: dict,
+    *,
+    phone_number: str | None = None,
+    meta_access_token: str = "",
+    facebook_page_id: str = "",
+    instagram_account_id: str = "",
+    whatsapp_token: str | None = None,
+) -> dict[str, Any]:
+    logger.info(f"API | SAVE | Writing profile for {client_id} to disk")
 
-    profile = dict(req.profile_json or {})
+    profile = _normalize_profile_for_persistence(profile_json or {})
     website_url = _normalize_public_source_url(profile.get("website_url"))
     social_url = _normalize_public_source_url(profile.get("social_url"))
     if website_url:
@@ -4207,33 +4711,63 @@ async def api_save_client_profile(req: ProfileSaveRequest):
         if isinstance(website_digest, dict) and str(website_digest.get("status") or "").strip() == "success":
             profile["website_digest"] = website_digest
 
+    profile = _normalize_profile_for_persistence(profile)
     missing_fields = validate_synthesized_profile(profile)
     if missing_fields:
-        return JSONResponse(status_code=400, content={"status": "missing", "missing_fields": missing_fields, "reason": "Client profile is missing critical brand intelligence."})
+        return {
+            "status": "missing",
+            "missing_fields": missing_fields,
+            "reason": "Client profile is missing critical brand intelligence.",
+            "profile_json": profile,
+        }
 
-    full_data = req.model_dump(exclude_none=True)
+    full_data = {
+        "client_id": client_id,
+        "phone_number": phone_number,
+        "meta_access_token": meta_access_token,
+        "whatsapp_token": whatsapp_token,
+        "facebook_page_id": facebook_page_id,
+        "instagram_account_id": instagram_account_id,
+    }
     full_data["profile_json"] = profile
     store = get_client_store()
-    saved_client = store.save_client(req.client_id, full_data)
-    brand_data = build_brand_profile(req.client_id, profile)
-    store.save_brand_profile(req.client_id, brand_data)
+    saved_client = store.save_client(client_id, full_data)
+    brand_data = build_brand_profile(client_id, profile)
+    store.save_brand_profile(client_id, brand_data)
     
-    logger.info(f"API | SAVE | Brand profile synced for {req.client_id} via {store.backend_name} backend")
+    logger.info(f"API | SAVE | Brand profile synced for {client_id} via {store.backend_name} backend")
         
     # 3. Relegate phone_map explicitly to simple phone->clientID lookups
-    if req.phone_number:
+    if phone_number:
         phone_map = load_phone_map()
-        phone_map[req.phone_number] = req.client_id
+        phone_map[phone_number] = client_id
         with open("phone_map.json", "w", encoding="utf-8") as f:
             json.dump(phone_map, f, indent=4)
 
-    asyncio.create_task(_background_build_client_trend_dossier(req.client_id))
+    asyncio.create_task(_background_build_client_trend_dossier(client_id))
         
     return {
         "status": "success",
-        "message": f"Client {req.client_id} securely registered. Brand profile persisted via {store.backend_name} backend.",
+        "client_id": client_id,
+        "message": f"Client {client_id} securely registered. Brand profile persisted via {store.backend_name} backend.",
         "client": saved_client,
     }
+
+
+@app.post("/api/save-client-profile")
+async def api_save_client_profile(req: ProfileSaveRequest):
+    result = await persist_client_profile(
+        req.client_id,
+        req.profile_json,
+        phone_number=req.phone_number,
+        meta_access_token=req.meta_access_token,
+        facebook_page_id=req.facebook_page_id,
+        instagram_account_id=req.instagram_account_id,
+        whatsapp_token=req.whatsapp_token,
+    )
+    if str(result.get("status") or "").strip().lower() == "missing":
+        return JSONResponse(status_code=400, content=result)
+    return result
 
 def _ensure_instagram_compliant_image(file_bytes: bytearray, filename: str) -> tuple[bytes, str]:
     """
@@ -4379,13 +4913,14 @@ async def api_update_client(client_id: str, req: ClientUpdateRequest):
     if "profile_json" in updates:
         existing_profile = data.get("profile_json", {})
         existing_profile.update(updates["profile_json"])
-        data["profile_json"] = existing_profile
+        data["profile_json"] = _normalize_profile_for_persistence(existing_profile)
         del updates["profile_json"]
         updates["profile_json_merged"] = True
     
     data.update({k: v for k, v in updates.items() if k != "profile_json_merged"})
 
     if updates.get("profile_json_merged"):
+        data["profile_json"] = _normalize_profile_for_persistence(data.get("profile_json", {}))
         missing_fields = validate_synthesized_profile(data.get("profile_json", {}))
         if missing_fields:
             return JSONResponse(status_code=400, content={"status": "missing", "missing_fields": missing_fields, "reason": "Client profile is missing critical brand intelligence."})

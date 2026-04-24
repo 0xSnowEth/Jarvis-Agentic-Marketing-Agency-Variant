@@ -27,6 +27,12 @@ create table if not exists client_trend_dossiers (
   built_at timestamptz not null default now()
 );
 
+create table if not exists caption_technique_snapshots (
+  snapshot_key text primary key,
+  snapshot_json jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists assets (
   asset_id uuid primary key default gen_random_uuid(),
   client_id text not null references clients(client_id) on delete cascade,
@@ -50,6 +56,7 @@ create table if not exists creative_drafts (
   hashtags jsonb not null default '[]'::jsonb,
   seo_keyword_used text not null default '',
   topic_hint text not null default '',
+  caption_metadata jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   unique (client_id, draft_name)
@@ -152,6 +159,7 @@ create table if not exists operator_audit_events (
 create index if not exists idx_assets_client_id on assets(client_id);
 create unique index if not exists idx_assets_client_filename on assets(client_id, original_filename);
 create index if not exists idx_client_trend_dossiers_built_at on client_trend_dossiers(built_at);
+create index if not exists idx_caption_technique_snapshots_updated_at on caption_technique_snapshots(updated_at);
 create index if not exists idx_drafts_client_id on creative_drafts(client_id);
 create index if not exists idx_schedule_jobs_client_id on schedule_jobs(client_id);
 create index if not exists idx_schedule_jobs_scheduled_date on schedule_jobs(scheduled_date);

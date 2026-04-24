@@ -10,10 +10,10 @@ import httpx
 
 from client_store import get_data_backend_name, get_supabase_service_client
 from file_lock import file_lock
-from schedule_utils import coerce_days, parse_iso_date
+from schedule_utils import coerce_days, parse_iso_date, parse_time_string
 
 SCHEDULE_PATH = "schedule.json"
-NON_EXECUTABLE_STATUSES = {"pending_approval", "delivered", "rejected", "failed"}
+NON_EXECUTABLE_STATUSES = {"pending_approval", "delivered", "rejected", "failed", "expired"}
 HISTORY_STATUSES = {"delivered", "rejected", "failed"}
 DELIVERED_RETENTION_HOURS = 24
 logger = logging.getLogger("ScheduleStore")
@@ -77,6 +77,52 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def scheduled_run_at(job: dict[str, Any]) -> datetime | None:
+    normalized = normalize_job(job)
+    scheduled_date = parse_iso_date(str(normalized.get("scheduled_date") or "").strip())
+    if not scheduled_date:
+        return None
+    time_text = str(normalized.get("time") or "").strip()
+    if not time_text:
+        return None
+    try:
+        parsed_time = parse_time_string(time_text)
+    except Exception:
+        return None
+    return datetime.combine(scheduled_date, parsed_time)
+
+
+def is_past_due_one_off_job(job: dict[str, Any], *, now: datetime | None = None) -> bool:
+    normalized = normalize_job(job)
+    if not str(normalized.get("scheduled_date") or "").strip():
+        return False
+    scheduled_at = scheduled_run_at(normalized)
+    if scheduled_at is None:
+        return False
+    comparison_now = now or datetime.now()
+    return scheduled_at < comparison_now
+
+
+def purge_past_due_one_off_jobs(
+    jobs: Iterable[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    comparison_now = now or datetime.now()
+    updated_jobs: list[dict[str, Any]] = []
+    changed = 0
+
+    for job in jobs:
+        normalized = normalize_job(job)
+        status = str(normalized.get("status") or "").strip().lower()
+        if status == "approved" and is_past_due_one_off_job(normalized, now=comparison_now):
+            changed += 1
+            continue
+        updated_jobs.append(normalized)
+
+    return updated_jobs, changed
+
+
 def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(job) if isinstance(job, dict) else {}
     normalized["job_id"] = str(normalized.get("job_id") or uuid.uuid4().hex[:12]).strip()
@@ -122,17 +168,20 @@ def prune_expired_delivered_jobs(
     return kept, removed
 
 
-def split_schedule_views(jobs: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def split_schedule_views(
+    jobs: Iterable[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     active: list[dict[str, Any]] = []
     history: list[dict[str, Any]] = []
-    today = datetime.now().date()
+    comparison_now = now or datetime.now()
+    prepared_jobs, _ = purge_past_due_one_off_jobs(jobs, now=comparison_now)
 
-    for job in jobs:
+    for job in prepared_jobs:
         normalized = normalize_job(job)
         status = str(normalized.get("status") or "").strip().lower()
-        scheduled_date = parse_iso_date(normalized.get("scheduled_date"))
-        is_past_one_off = bool(scheduled_date and scheduled_date < today)
-        if status in {"delivered", "failed", "rejected"} or is_past_one_off:
+        if status in HISTORY_STATUSES:
             history.append(normalized)
         else:
             active.append(normalized)
@@ -240,8 +289,9 @@ class JsonScheduleStore(BaseScheduleStore):
     def list_jobs(self) -> list[dict[str, Any]]:
         with file_lock(self.path):
             normalized_jobs = self._list_jobs_unsafe()
-            pruned_jobs, _ = prune_expired_delivered_jobs(normalized_jobs)
-            if pruned_jobs != normalized_jobs:
+            active_jobs, expired_changes = purge_past_due_one_off_jobs(normalized_jobs)
+            pruned_jobs, _ = prune_expired_delivered_jobs(active_jobs)
+            if expired_changes or pruned_jobs != normalized_jobs:
                 self._replace_jobs_unsafe(pruned_jobs)
             return pruned_jobs
 
@@ -281,7 +331,7 @@ class JsonScheduleStore(BaseScheduleStore):
             kept = [
                 job
                 for job in jobs
-                if str(job.get("status") or "").strip().lower() not in ("delivered", "failed")
+                if str(job.get("status") or "").strip().lower() not in ("delivered", "failed", "expired")
             ]
             removed = len(jobs) - len(kept)
             if removed > 0:
@@ -385,11 +435,23 @@ class SupabaseScheduleStore(BaseScheduleStore):
             "list_jobs",
         )
         normalized_jobs = [self._row_to_job(row) for row in (response.data or [])]
-        kept, removed = prune_expired_delivered_jobs(normalized_jobs)
-        if removed:
+        kept_jobs, expired_changes = purge_past_due_one_off_jobs(normalized_jobs)
+        if expired_changes:
             stale_ids = {
                 str(job.get("job_id") or "").strip()
                 for job in normalized_jobs
+                if job not in kept_jobs and str(job.get("job_id") or "").strip()
+            }
+            for stale_id in stale_ids:
+                _execute_supabase_with_retry(
+                    self.client.table("schedule_jobs").delete().eq("job_id", stale_id),
+                    f"delete expired one-off job {stale_id}",
+                )
+        kept, removed = prune_expired_delivered_jobs(kept_jobs)
+        if removed:
+            stale_ids = {
+                str(job.get("job_id") or "").strip()
+                for job in kept_jobs
                 if job.get("status") == "delivered"
                 and str(job.get("job_id") or "").strip()
                 and job not in kept

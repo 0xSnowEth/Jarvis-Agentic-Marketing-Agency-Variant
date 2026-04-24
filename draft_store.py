@@ -73,6 +73,7 @@ class JsonDraftStore(BaseDraftStore):
             "hashtags": normalized["hashtags"],
             "seo_keyword_used": normalized["seo_keyword_used"],
             "topic_hint": normalized["topic_hint"],
+            "caption_metadata": normalized.get("caption_metadata") or {},
         }
         save_queue_data(queue_path, data)
         return self.get_draft(client_id, draft_name) or normalized
@@ -131,6 +132,7 @@ class SupabaseDraftStore(BaseDraftStore):
                 "hashtags": row.get("hashtags", []),
                 "seo_keyword_used": row.get("seo_keyword_used"),
                 "topic_hint": row.get("topic_hint"),
+                "caption_metadata": row.get("caption_metadata") or {},
             },
         )
 
@@ -154,6 +156,7 @@ class SupabaseDraftStore(BaseDraftStore):
                 "hashtags": payload["hashtags"],
                 "seo_keyword_used": payload["seo_keyword_used"],
                 "topic_hint": payload["topic_hint"],
+                "caption_metadata": payload.get("caption_metadata") or {},
                 "draft_id": row.get("draft_id"),
             }
         return {"bundles": bundles}
@@ -203,8 +206,15 @@ class SupabaseDraftStore(BaseDraftStore):
             "hashtags": normalized["hashtags"],
             "seo_keyword_used": normalized["seo_keyword_used"],
             "topic_hint": normalized["topic_hint"],
+            "caption_metadata": normalized.get("caption_metadata") or {},
         }
-        self.client.table("creative_drafts").upsert(row, on_conflict="client_id,draft_name").execute()
+        try:
+            self.client.table("creative_drafts").upsert(row, on_conflict="client_id,draft_name").execute()
+        except Exception as exc:
+            if "caption_metadata" not in str(exc):
+                raise
+            row.pop("caption_metadata", None)
+            self.client.table("creative_drafts").upsert(row, on_conflict="client_id,draft_name").execute()
         return self.get_draft(client_id, draft_name) or normalized
 
     def delete_draft(self, client_id: str, draft_name: str) -> bool:

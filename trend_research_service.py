@@ -10,12 +10,15 @@ from email.utils import parsedate_to_datetime
 from html import unescape as html_unescape
 from typing import Any
 from urllib.parse import urlparse
+from llm_config import build_sync_client
+
 
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from client_store import get_client_store
+from external_context_safety import sanitize_website_digest
 
 load_dotenv()
 
@@ -394,6 +397,7 @@ def extract_website_digest(url: str) -> dict[str, Any]:
         "fetched_at": _utc_now_iso(),
         "fetch_ms": round((time.perf_counter() - started_at) * 1000),
     }
+    digest, _report = sanitize_website_digest(digest)
     return digest
 
 
@@ -542,21 +546,17 @@ def _build_research_queries(client_id: str, profile: dict[str, Any], website_dig
 def _build_llm_client() -> tuple[OpenAI, str] | tuple[None, str]:
     openrouter_key = str(os.getenv("OPENROUTER_API_KEY") or "").strip()
     openai_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
+
     if openrouter_key:
         model = TREND_DOSSIER_MODEL or "openai/gpt-4o-mini"
-        return (
-            OpenAI(
-                base_url=TREND_OPENROUTER_BASE_URL,
-                api_key=openrouter_key,
-                timeout=TREND_LLM_TIMEOUT_SECONDS,
-                max_retries=0,
-            ),
-            model,
-        )
+        return build_sync_client("openrouter", timeout=TREND_LLM_TIMEOUT_SECONDS, max_retries=0), model
+
     if openai_key:
         model = TREND_DOSSIER_MODEL or "gpt-4o-mini"
-        return OpenAI(api_key=openai_key, timeout=TREND_LLM_TIMEOUT_SECONDS, max_retries=0), model
+        return build_sync_client("openai", timeout=TREND_LLM_TIMEOUT_SECONDS, max_retries=0), model
+
     return None, ""
+
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:

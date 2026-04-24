@@ -1,18 +1,15 @@
 import os
 import json
 from dotenv import load_dotenv
+from llm_config import build_async_client
+from agents import Agent, Runner, function_tool, set_default_openai_client, set_tracing_disabled
 
 load_dotenv()
 WHATSAPP_MODEL = os.getenv("WHATSAPP_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
-from agents import Agent, Runner, function_tool, set_default_openai_client, set_tracing_disabled
-from openai import AsyncOpenAI
 
 # Override base URL to OpenRouter so we can utilize free models seamlessly
-custom_client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-)
+custom_client = build_async_client("openrouter", timeout=30, max_retries=0)
 set_default_openai_client(custom_client)
 set_tracing_disabled(True)
 

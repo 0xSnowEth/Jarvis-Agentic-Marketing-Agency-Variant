@@ -2,10 +2,15 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any
+import httpx
+from supabase import create_client
+from supabase.lib.client_options import SyncClientOptions
+
 
 from dotenv import load_dotenv
 
 load_dotenv()
+_supabase_httpx_client = None
 
 
 class ClientStoreError(RuntimeError):
@@ -235,7 +240,7 @@ def get_data_backend_name() -> str:
 
 
 def get_supabase_service_client():
-    global _supabase_client
+    global _supabase_client, _supabase_httpx_client
     if _supabase_client is not None:
         return _supabase_client
 
@@ -243,15 +248,24 @@ def get_supabase_service_client():
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not url or not key:
         raise ClientStoreError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for Supabase mode.")
-    try:
-        from supabase import create_client
-    except ImportError as exc:
-        raise ClientStoreError(
-            "Supabase backend requested but the supabase package is not installed. Add it to the environment first."
-        ) from exc
 
-    _supabase_client = create_client(url, key)
+    if _supabase_httpx_client is None:
+        _supabase_httpx_client = httpx.Client(
+            timeout=httpx.Timeout(120.0),
+            verify=True,
+            http2=True,
+            follow_redirects=True,
+        )
+
+    options = SyncClientOptions(
+        httpx_client=_supabase_httpx_client,
+        postgrest_client_timeout=httpx.Timeout(120.0),
+        storage_client_timeout=20,
+    )
+
+    _supabase_client = create_client(url, key, options=options)
     return _supabase_client
+
 
 
 def get_client_store() -> BaseClientStore:

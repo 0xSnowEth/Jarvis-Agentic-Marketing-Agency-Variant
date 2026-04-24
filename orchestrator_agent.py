@@ -594,10 +594,10 @@ def resolve_client_id(raw_id: str) -> str:
 
 def verify_meta_token(client_id: str):
     import requests
-    access_token = os.getenv("META_ACCESS_TOKEN")
+    access_token = ""
     try:
         cdata = get_client_store().get_client(client_id) or {}
-        access_token = cdata.get("meta_access_token", access_token)
+        access_token = str(cdata.get("meta_access_token") or "").strip()
     except Exception:
         pass
             
@@ -1150,9 +1150,26 @@ class RequestApprovalTool:
     def execute(self, client_id, topic, days, time, bundle_name=None, image=None, scheduled_date=None, draft_id=None, approval_routing_override=None):
         try:
             import uuid
-            from webhook_server import build_approval_preview, get_agency_config, get_approval_routing_mode, normalize_approval_routing_mode, send_pending_approval_to_whatsapp
+            from webhook_server import (
+                _validate_demo_meta_client,
+                build_approval_preview,
+                get_agency_config,
+                get_approval_routing_mode,
+                normalize_approval_routing_mode,
+                send_pending_approval_to_whatsapp,
+            )
 
             client_id = resolve_client_id(client_id)
+            client_profile = get_client_store().get_client(client_id) or {}
+            meta_probe = _validate_demo_meta_client(client_id, client_profile)
+            if not meta_probe.get("ok"):
+                reason = str(meta_probe.get("detail") or "Meta credentials are not ready for this client.").strip()
+                return {
+                    "error": (
+                        f"Meta approval preflight failed for {client_id}. "
+                        f"{reason} Connect valid Meta publishing credentials before requesting approval."
+                    )
+                }
             caption_preview_line = ""
             resolved_draft = resolve_saved_draft_reference(client_id, bundle_name=bundle_name, topic=topic, draft_id=draft_id)
             if resolved_draft:
@@ -1472,9 +1489,9 @@ class MetaInsightsScannerTool:
         if not cdata:
             return {"error": f"Client '{client_id}' not found. Register them in the dashboard first."}
         
-        access_token = cdata.get("meta_access_token", os.getenv("META_ACCESS_TOKEN"))
-        ig_user_id = cdata.get("instagram_account_id", os.getenv("META_IG_USER_ID"))
-        fb_page_id = cdata.get("facebook_page_id", os.getenv("META_PAGE_ID"))
+        access_token = str(cdata.get("meta_access_token") or "").strip()
+        ig_user_id = str(cdata.get("instagram_account_id") or "").strip()
+        fb_page_id = str(cdata.get("facebook_page_id") or "").strip()
         
         if not access_token:
             return {"error": "No Meta Access Token configured for this client."}
@@ -1679,7 +1696,12 @@ class OrchestratorAgent(Agent):
         ]
         jarvis_model = os.getenv("JARVIS_MODEL", "").strip()
         if not jarvis_model:
-            jarvis_model = "openai/gpt-4o-mini" if os.getenv("OPENROUTER_API_KEY") else "gpt-4o-mini"
+            if os.getenv("GROQ_API_KEY"):
+                jarvis_model = "groq:openai/gpt-oss-120b"
+            elif os.getenv("OPENROUTER_API_KEY"):
+                jarvis_model = "openai/gpt-4o-mini"
+            else:
+                jarvis_model = "gpt-4o-mini"
         super().__init__(tools, model=jarvis_model)
         self.system_message = (
             "You are JARVIS, the highly intelligent Lead Orchestrator for Orionx Agency OS. "
@@ -1708,166 +1730,172 @@ class OrchestratorAgent(Agent):
 _global_agent = OrchestratorAgent()
 
 def run_orchestrator(user_input: str, draft_refs: list[dict] | None = None, original_request: str | None = None):
-    global _global_agent
-    agent = _global_agent
-    # Reset message history per request to prevent unbounded memory growth (C-06)
-    agent.messages = []
-    original_request = original_request or user_input
-    forced_draft_refs = collect_explicit_draft_targets(original_request, draft_refs) or draft_refs or extract_forced_draft_refs(original_request)
-    explicit_batch_result = maybe_execute_explicit_batch_publish(agent, original_request, forced_draft_refs)
-    if explicit_batch_result is not None:
-        return explicit_batch_result
-    max_turns = 10
-    i = 0
-    repeated_tool_rounds = 0
-    last_tool_fingerprint = None
-    last_error_message = None
-    last_structured_action = None
-    last_strategy_plan = None
+    try:
+        global _global_agent
+        agent = _global_agent
+        # Reset message history per request to prevent unbounded memory growth (C-06)
+        agent.messages = []
+        original_request = original_request or user_input
+        forced_draft_refs = collect_explicit_draft_targets(original_request, draft_refs) or draft_refs or extract_forced_draft_refs(original_request)
+        explicit_batch_result = maybe_execute_explicit_batch_publish(agent, original_request, forced_draft_refs)
+        if explicit_batch_result is not None:
+            return explicit_batch_result
+        max_turns = 10
+        i = 0
+        repeated_tool_rounds = 0
+        last_tool_fingerprint = None
+        last_error_message = None
+        last_structured_action = None
+        last_strategy_plan = None
     
-    while i < max_turns:
-        i += 1
-        logger.info(f"Orchestrator Cycle {i} - Pinging OpenAI/OpenRouter via SDK...")
-        
-        response = agent.chat(user_input)
-        if not response.choices:
-            return "Error: No response generated from active LLM gateway."
+        while i < max_turns:
+            i += 1
+            logger.info(f"Orchestrator Cycle {i} - Pinging OpenAI/OpenRouter via SDK...")
             
-        message = response.choices[0].message
-        
-        if message.tool_calls:
-            agent.messages.append(message)
-            current_fingerprint_parts = []
-            round_errors = []
-            immediate_replies = []
-            immediate_draft_refs = []
-            for tool_call in message.tool_calls:
-                tool_name = tool_call.function.name
-                try:
-                    tool_input = json.loads(tool_call.function.arguments)
-                except (json.JSONDecodeError, TypeError) as parse_err:
-                    logger.error(f"Orchestrator | Failed to parse tool arguments for {tool_name}: {parse_err}")
+            response = agent.chat(user_input)
+            if not response.choices:
+                return "Error: No response generated from active LLM gateway."
+            
+            message = response.choices[0].message
+            
+            if message.tool_calls:
+                agent.messages.append(message)
+                current_fingerprint_parts = []
+                round_errors = []
+                immediate_replies = []
+                immediate_draft_refs = []
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    try:
+                        tool_input = json.loads(tool_call.function.arguments)
+                    except (json.JSONDecodeError, TypeError) as parse_err:
+                        logger.error(f"Orchestrator | Failed to parse tool arguments for {tool_name}: {parse_err}")
+                        agent.messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": f"Invalid tool arguments from LLM for {tool_name}. Retry the request."})
+                        })
+                        continue
+                    tool_input = inject_forced_draft_reference(tool_input, forced_draft_refs)
+                    logger.info(f"Orchestrator invoking physical Python tool: {tool_name} | constraints: {tool_input}")
+                    current_fingerprint_parts.append(
+                        json.dumps({"tool": tool_name, "input": tool_input}, sort_keys=True, ensure_ascii=False)
+                    )
+                
+                    tool = agent.tool_map.get(tool_name)
+                    try:
+                        if tool_name == "trigger_pipeline_now" and prompt_implies_scheduling(original_request):
+                            tool_result = {
+                                "error": (
+                                    "This request clearly includes a scheduled release window, so it must go through "
+                                    "the approval/scheduling workflow instead of immediate publishing."
+                                )
+                            }
+                        elif tool:
+                            tool_result = tool.execute(**tool_input)
+                        else:
+                            tool_result = {"error": f"Physical Tool {tool_name} not mounted."}
+                    except Exception as e:
+                        logger.error(f"Tool {tool_name} crashed: {type(e).__name__}: {str(e)}", exc_info=True)
+                        tool_result = {
+                            "error": f"{tool_name} encountered an internal error: {type(e).__name__}: {str(e)}",
+                        }
+
+                    if isinstance(tool_result, dict) and tool_result.get("error"):
+                        round_errors.append(str(tool_result["error"]))
+                        last_error_message = str(tool_result["error"])
+                    elif (
+                        tool_name == "request_client_approval"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("status") == "success"
+                        and tool_result.get("approval_id")
+                    ):
+                        last_structured_action = {
+                            "type": "approval_request",
+                            "approval_id": str(tool_result.get("approval_id") or "").strip(),
+                            "job_id": str(tool_result.get("job_id") or "").strip(),
+                            "message": str(tool_result.get("message") or "").strip(),
+                        }
+                    elif (
+                        tool_name == "run_strategy_plan"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("strategy_plan")
+                    ):
+                        last_strategy_plan = tool_result.get("strategy_plan")
+                        last_structured_action = {
+                            "type": "strategy_plan",
+                            "plan_id": str(tool_result.get("plan_id") or last_strategy_plan.get("plan_id") or "").strip(),
+                            "client_id": str(tool_result.get("client_id") or last_strategy_plan.get("client_id") or "").strip(),
+                            "message": str(tool_result.get("summary") or "").strip(),
+                        }
+                    elif (
+                        tool_name == "trigger_pipeline_now"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("status") == "partial_success"
+                    ):
+                        immediate_replies.append(str(tool_result.get("message") or "").strip())
+                        if isinstance(tool_result.get("draft_refs"), list):
+                            immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
+                    elif (
+                        tool_name == "trigger_pipeline_now"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("status") == "success"
+                    ):
+                        immediate_replies.append(str(tool_result.get("message") or "").strip())
+                        if isinstance(tool_result.get("draft_refs"), list):
+                            immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
+                    elif (
+                        tool_name == "trigger_pipeline_now"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("error")
+                    ):
+                        immediate_replies.append(str(tool_result.get("error") or "").strip())
+                    
                     agent.messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": json.dumps({"error": f"Invalid tool arguments from LLM for {tool_name}. Retry the request."})
+                        "content": json.dumps(tool_result)
                     })
-                    continue
-                tool_input = inject_forced_draft_reference(tool_input, forced_draft_refs)
-                logger.info(f"Orchestrator invoking physical Python tool: {tool_name} | constraints: {tool_input}")
-                current_fingerprint_parts.append(
-                    json.dumps({"tool": tool_name, "input": tool_input}, sort_keys=True, ensure_ascii=False)
-                )
-                
-                tool = agent.tool_map.get(tool_name)
-                try:
-                    if tool_name == "trigger_pipeline_now" and prompt_implies_scheduling(original_request):
-                        tool_result = {
-                            "error": (
-                                "This request clearly includes a scheduled release window, so it must go through "
-                                "the approval/scheduling workflow instead of immediate publishing."
-                            )
+
+                current_fingerprint = "|".join(current_fingerprint_parts)
+                if current_fingerprint == last_tool_fingerprint:
+                    repeated_tool_rounds += 1
+                else:
+                    repeated_tool_rounds = 0
+                    last_tool_fingerprint = current_fingerprint
+
+                if repeated_tool_rounds >= 1 and round_errors:
+                    if "client" in " ".join(round_errors).lower():
+                        return {
+                            "reply": "Jarvis got stuck resolving the request because the target client context was unclear. Please retry with an explicit client mention like `@burger_grillz schedule Reel 1 for tomorrow at 12:10 PM`."
                         }
-                    elif tool:
-                        tool_result = tool.execute(**tool_input)
-                    else:
-                        tool_result = {"error": f"Physical Tool {tool_name} not mounted."}
-                except Exception as e:
-                    logger.error(f"Tool {tool_name} crashed: {type(e).__name__}: {str(e)}", exc_info=True)
-                    tool_result = {
-                        "error": f"{tool_name} encountered an internal error: {type(e).__name__}: {str(e)}",
-                    }
+                    return {"reply": round_errors[-1]}
 
-                if isinstance(tool_result, dict) and tool_result.get("error"):
-                    round_errors.append(str(tool_result["error"]))
-                    last_error_message = str(tool_result["error"])
-                elif (
-                    tool_name == "request_client_approval"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("status") == "success"
-                    and tool_result.get("approval_id")
-                ):
-                    last_structured_action = {
-                        "type": "approval_request",
-                        "approval_id": str(tool_result.get("approval_id") or "").strip(),
-                        "job_id": str(tool_result.get("job_id") or "").strip(),
-                        "message": str(tool_result.get("message") or "").strip(),
-                    }
-                elif (
-                    tool_name == "run_strategy_plan"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("strategy_plan")
-                ):
-                    last_strategy_plan = tool_result.get("strategy_plan")
-                    last_structured_action = {
-                        "type": "strategy_plan",
-                        "plan_id": str(tool_result.get("plan_id") or last_strategy_plan.get("plan_id") or "").strip(),
-                        "client_id": str(tool_result.get("client_id") or last_strategy_plan.get("client_id") or "").strip(),
-                        "message": str(tool_result.get("summary") or "").strip(),
-                    }
-                elif (
-                    tool_name == "trigger_pipeline_now"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("status") == "partial_success"
-                ):
-                    immediate_replies.append(str(tool_result.get("message") or "").strip())
-                    if isinstance(tool_result.get("draft_refs"), list):
-                        immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
-                elif (
-                    tool_name == "trigger_pipeline_now"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("status") == "success"
-                ):
-                    immediate_replies.append(str(tool_result.get("message") or "").strip())
-                    if isinstance(tool_result.get("draft_refs"), list):
-                        immediate_draft_refs.extend(tool_result.get("draft_refs") or [])
-                elif (
-                    tool_name == "trigger_pipeline_now"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("error")
-                ):
-                    immediate_replies.append(str(tool_result.get("error") or "").strip())
-                    
-                agent.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": json.dumps(tool_result)
-                })
+                if immediate_replies:
+                    payload = {"reply": summarize_multi_publish_results(immediate_replies)}
+                    if immediate_draft_refs:
+                        payload["draft_refs"] = immediate_draft_refs
+                    return payload
 
-            current_fingerprint = "|".join(current_fingerprint_parts)
-            if current_fingerprint == last_tool_fingerprint:
-                repeated_tool_rounds += 1
+                user_input = "" 
             else:
-                repeated_tool_rounds = 0
-                last_tool_fingerprint = current_fingerprint
-
-            if repeated_tool_rounds >= 1 and round_errors:
-                if "client" in " ".join(round_errors).lower():
-                    return {
-                        "reply": "Jarvis got stuck resolving the request because the target client context was unclear. Please retry with an explicit client mention like `@burger_grillz schedule Reel 1 for tomorrow at 12:10 PM`."
-                    }
-                return {"reply": round_errors[-1]}
-
-            if immediate_replies:
-                payload = {"reply": summarize_multi_publish_results(immediate_replies)}
-                if immediate_draft_refs:
-                    payload["draft_refs"] = immediate_draft_refs
+                final_reply = str(message.content or "").strip()
+                if not final_reply and last_structured_action:
+                    final_reply = str(last_structured_action.get("message") or "").strip()
+                payload = {"reply": final_reply}
+                if last_structured_action:
+                    payload["action"] = last_structured_action
+                if last_strategy_plan:
+                    payload["strategy_plan"] = last_strategy_plan
                 return payload
-
-            user_input = "" 
-        else:
-            final_reply = str(message.content or "").strip()
-            if not final_reply and last_structured_action:
-                final_reply = str(last_structured_action.get("message") or "").strip()
-            payload = {"reply": final_reply}
-            if last_structured_action:
-                payload["action"] = last_structured_action
-            if last_strategy_plan:
-                payload["strategy_plan"] = last_strategy_plan
-            return payload
             
-    if last_error_message:
-        return {"reply": last_error_message}
-    return {
-        "reply": "Jarvis reached its orchestration safety limit without resolving the request. Retry with a more explicit scheduling target, preferably including the client mention and exact date."
-    }
+        if last_error_message:
+            return {"reply": last_error_message}
+        return {
+            "reply": "Jarvis reached its orchestration safety limit without resolving the request. Retry with a more explicit scheduling target, preferably including the client mention and exact date."
+        }
+    except Exception as exc:
+        logger.error("run_orchestrator failed: %s", exc, exc_info=True)
+        return {
+            "reply": f"Jarvis orchestration failed: {type(exc).__name__}: {exc}"
+        }
