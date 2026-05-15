@@ -1,4 +1,4 @@
-# Jarvis
+# Jarvis (Unfortunately Due to the increasing Complexity i decided to ditch this and eventually make a better more smoother one using another framework)
 
 Jarvis is now a WhatsApp-first agency operating system for multi-client content teams.
 
